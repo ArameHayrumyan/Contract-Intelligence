@@ -12,7 +12,7 @@ from __future__ import annotations
 import logging
 import logging.handlers
 import sys
-from enum import Enum
+from enum import StrEnum
 from functools import lru_cache
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -35,7 +35,7 @@ class ConfigurationError(RuntimeError):
     """
 
 
-class Environment(str, Enum):
+class Environment(StrEnum):
     """Deployment environment, controlling the provider safety gate."""
 
     DEV = "dev"
@@ -43,7 +43,7 @@ class Environment(str, Enum):
     PRODUCTION = "production"
 
 
-class LLMProvider(str, Enum):
+class LLMProvider(StrEnum):
     """Supported LLM providers.
 
     Free-tier providers are acceptable in ``dev``/``staging`` but are rejected
@@ -233,8 +233,13 @@ class LLMProviderFactory:
         if provider in (LLMProvider.GROQ_FREE, LLMProvider.GROQ_PAID):
             from langchain_groq import ChatGroq
 
-            model = "llama-3.1-8b-instant" if provider is LLMProvider.GROQ_FREE else "llama-3.3-70b-versatile"
-            return ChatGroq(
+            # 70B (not 8B) for both tiers: the 8B model is unreliable at the
+            # structured tool/function call the audit requires (`tool_use_failed`),
+            # while token-per-minute limits are per-request, not per-model.
+            model = "llama-3.3-70b-versatile"
+            # langchain accepts `model` via field alias; its stubs name the field
+            # `model_name`, so silence the version-dependent call-arg mismatch.
+            return ChatGroq(  # type: ignore[call-arg]
                 model=model,
                 temperature=s.llm_temperature,
                 api_key=_secret(s.groq_api_key),
@@ -263,7 +268,7 @@ class LLMProviderFactory:
         if provider is LLMProvider.ANTHROPIC:
             from langchain_anthropic import ChatAnthropic
 
-            return ChatAnthropic(
+            return ChatAnthropic(  # type: ignore[call-arg]
                 model_name="claude-haiku-4-5-20251001",
                 temperature=s.llm_temperature,
                 api_key=_secret(s.anthropic_api_key),
@@ -329,9 +334,16 @@ def configure_logging(settings: Settings) -> None:
     stream_handler = logging.StreamHandler(sys.stdout)
     stream_handler.setFormatter(formatter)
 
+    # The filter MUST live on the handlers, not the logger: a logger-level filter
+    # only sees records logged directly to "rag_core", not records propagated up
+    # from child loggers (rag_core.engine, rag_core.api.*) or emitted on a
+    # background thread. Handler-level filters see every record the handler
+    # formats, guaranteeing `request_id` is always present.
+    for handler in (file_handler, stream_handler):
+        handler.addFilter(_RequestIdFilter())
+
     root = logging.getLogger("rag_core")
     root.setLevel(settings.log_level)
-    root.addFilter(_RequestIdFilter())
     # Idempotent: clear handlers so repeated calls (tests, reload) don't stack.
     root.handlers.clear()
     root.addHandler(file_handler)

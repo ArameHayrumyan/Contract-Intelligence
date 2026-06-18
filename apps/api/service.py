@@ -22,7 +22,7 @@ from concurrent.futures import ThreadPoolExecutor
 
 from rag_core.config import LLMProviderFactory, Settings
 from rag_core.engine import AuditEngine
-from rag_core.ingestion_queue import IngestionQueue, InProcessIngestionQueue, IngestJob
+from rag_core.ingestion_queue import IngestionQueue, IngestJob, InProcessIngestionQueue
 from rag_core.processor import DocumentProcessor
 from rag_core.schemas import (
     ContractAuditSchema,

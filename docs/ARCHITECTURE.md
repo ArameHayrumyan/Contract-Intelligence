@@ -23,8 +23,8 @@ rag_core (packages/rag_core)
   ├─ config      Settings + environment-gated LLMProviderFactory
   ├─ security    size cap · MIME sniff · page cap (pre-parse)
   ├─ processor   pdfplumber → OCR failover → hierarchy-aware chunking
-  ├─ storage     tenant-scoped Chroma collections + filtering
-  ├─ engine      multi-query expansion · RRF (k=60) · structured output
+  ├─ storage     tenant-scoped Chroma collections + per-tenant BM25 index
+  ├─ engine      multi-query expansion · hybrid (vector+BM25) RRF (k=60) · structured output
   ├─ ingestion_queue   IngestionQueue protocol + in-process impl
   └─ schemas     ContractAuditSchema with per-clause provenance
 ```
@@ -44,16 +44,29 @@ rag_core (packages/rag_core)
 ### Audit
 1. `GET /documents/{id}/audit` (computed lazily, cached).
 2. `engine.audit_document` expands the intent into 3 variants (compliance,
-   financial, termination), retrieves top-10 per variant from the tenant's
-   collection, fuses with RRF (k=60), takes the top 5.
+   financial, termination). Retrieval is **hybrid**: each variant runs both a
+   top-10 vector (semantic) search and a top-10 BM25 (keyword) search, so RRF
+   fuses **6 ranked lists** (k=60), and the top 5 fused chunks are kept.
 3. The LLM is called with `.with_structured_output(ContractAuditSchema)` under
    `tenacity` retry (rate-limit resilient).
 4. Provenance is reconciled: each clause's `page_number` is set from retrieval
    metadata so it cannot be hallucinated.
 
 ### Cross-document QA
-`POST /qa` expands the question into 3 variants, fuses tenant-scoped retrieval,
-and returns a grounded answer with `QACitation`s (chunk id + page).
+`POST /qa` expands the question into 3 variants, runs the same hybrid
+(vector + BM25) retrieval fused with RRF, and returns a grounded answer with
+`QACitation`s (chunk id + page).
+
+### Hybrid retrieval (why both)
+Pure vector search smooths away exact lexical references — article/section
+numbers (`Section 4.1.a`), defined terms, and precise figures — that lawyers
+search for verbatim. BM25 keyword search recovers those; semantic search keeps
+recall on paraphrased or conceptually-stated terms. Each tenant's BM25 index is
+built in-process from the same chunk text persisted in Chroma (Chroma stays the
+single source of truth) and rebuilt whenever the tenant's corpus changes during
+ingestion. Both retrievers return identical `RetrievedChunk` shapes carrying
+`chunk_id` + `page_number`, so they fuse through the **one** existing RRF
+function — there is no second fusion algorithm.
 
 ## Cross-cutting concerns
 

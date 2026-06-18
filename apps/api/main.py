@@ -21,8 +21,11 @@ from middleware.request_context import (
     RequestContextMiddleware,
     install_request_id_logging,
 )
-from rag_core.config import ConfigurationError, get_settings
-from rag_core.config import configure_logging as _configure_logging
+from rag_core.config import (
+    ConfigurationError,
+    configure_logging as _configure_logging,
+    get_settings,
+)
 from routers import audit, documents, qa
 from runtime import limiter
 from service import ContractService
@@ -80,7 +83,9 @@ def create_app() -> FastAPI:
 
     # Rate limiting (Section 6: cost-abuse controls).
     app.state.limiter = limiter
-    app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
+    # slowapi's handler is typed as (Request, RateLimitExceeded) -> Response,
+    # narrower than Starlette's (Request, Exception) handler type.
+    app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)  # type: ignore[arg-type]
     app.add_middleware(SlowAPIMiddleware)
 
     # Request correlation ids + structured log binding.

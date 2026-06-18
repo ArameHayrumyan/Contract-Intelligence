@@ -1,7 +1,8 @@
 # syntax=docker/dockerfile:1
 # ---- Secure Contract Intelligence API image -------------------------------
 # tesseract + a slim OpenCV-friendly base; no heavy ML OCR runtime (pytesseract
-# only). The local bge-small embedding model is pulled at first use.
+# only). The local bge-small embedding model is baked into the image at build
+# time (see below) so the container never downloads from HuggingFace at runtime.
 FROM python:3.11-slim AS base
 
 ENV PYTHONUNBUFFERED=1 \
@@ -27,6 +28,13 @@ RUN pip install /app/packages/rag_core
 # API dependencies.
 COPY apps/api/requirements.txt /app/apps/api/requirements.txt
 RUN pip install -r /app/apps/api/requirements.txt
+
+# Pre-download the embedding model into the image's HuggingFace cache so runtime
+# never depends on (or is rate-limited by) the HuggingFace Hub. Keep this id in
+# sync with Settings.embedding_model.
+ENV HF_HOME=/opt/hf-cache
+RUN mkdir -p "$HF_HOME" \
+    && python -c "from sentence_transformers import SentenceTransformer; SentenceTransformer('BAAI/bge-small-en-v1.5')"
 
 # Application code.
 COPY apps/api /app/apps/api

@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import logging
 import re
+import threading
 from dataclasses import dataclass
 from functools import lru_cache
 
@@ -20,6 +21,7 @@ import chromadb
 from chromadb.api import ClientAPI
 from chromadb.api.models.Collection import Collection
 from chromadb.utils import embedding_functions
+from rank_bm25 import BM25Okapi
 
 from rag_core.config import Settings
 from rag_core.schemas import Chunk
@@ -28,6 +30,42 @@ logger = logging.getLogger("rag_core.storage")
 
 #: Tenant ids must be safe to embed in a collection name.
 _TENANT_ID_RE = re.compile(r"^[a-zA-Z0-9_-]{1,64}$")
+
+#: Token pattern that preserves dotted/hyphenated legal identifiers as a single
+#: token (e.g. "4.1.a", "section-12b") so BM25 can match exact references that a
+#: naive word-split — or a semantic embedding — would shatter or smooth away.
+_TOKEN_RE = re.compile(r"[a-z0-9]+(?:[.\-][a-z0-9]+)*")
+
+
+def _tokenize(text: str) -> list[str]:
+    """Lowercase and tokenise text for BM25, keeping legal identifiers intact.
+
+    Args:
+        text: Raw chunk or query text.
+
+    Returns:
+        The list of tokens (may be empty).
+    """
+    return _TOKEN_RE.findall(text.lower())
+
+
+def _coerce_page(value: object) -> int | None:
+    """Coerce a Chroma metadata page value to a 1-based int, or ``None``.
+
+    Chroma metadata is a wide scalar union and uses the sentinel ``-1`` for
+    "unknown" (it cannot store ``None``).
+
+    Args:
+        value: The raw ``page_number`` metadata value.
+
+    Returns:
+        The page number, or ``None`` when unknown / unparseable.
+    """
+    if value is None or value == -1:
+        return None
+    if isinstance(value, int | float | str):
+        return int(value)
+    return None
 
 
 @dataclass(frozen=True)
@@ -47,6 +85,29 @@ class RetrievedChunk:
     page_number: int | None
     text: str
     distance: float
+
+
+@dataclass
+class _Bm25Index:
+    """In-memory BM25 index for one tenant, derived from persisted chunks.
+
+    Chroma remains the single source of truth; this index is a rebuildable
+    keyword-search view over the same corpus. The parallel arrays are positional:
+    index ``i`` in each list describes the same chunk.
+
+    Attributes:
+        bm25: The fitted BM25 model over the tokenised corpus.
+        ids: Chunk ids.
+        documents: Chunk texts.
+        doc_ids: Owning document id per chunk.
+        pages: 1-based page number per chunk (``None`` when unknown).
+    """
+
+    bm25: BM25Okapi
+    ids: list[str]
+    documents: list[str]
+    doc_ids: list[str]
+    pages: list[int | None]
 
 
 def _validate_tenant_id(tenant_id: str) -> None:
@@ -88,13 +149,22 @@ class TenantVectorStore:
     collection internally.
     """
 
-    def __init__(self, settings: Settings, *, client: ClientAPI | None = None) -> None:
+    def __init__(
+        self,
+        settings: Settings,
+        *,
+        client: ClientAPI | None = None,
+        embedding_function: embedding_functions.EmbeddingFunction | None = None,  # type: ignore[type-arg]
+    ) -> None:
         """Initialise the store.
 
         Args:
             settings: Application settings (persist dir, embedding model).
             client: Optional pre-built Chroma client (used by tests to inject an
                 in-memory ``EphemeralClient``).
+            embedding_function: Optional embedding function override. Defaults to
+                the local sentence-transformers model; tests can inject a
+                deterministic fake to avoid loading the model.
         """
         self._settings = settings
         if client is not None:
@@ -104,7 +174,12 @@ class TenantVectorStore:
             self._client = chromadb.PersistentClient(
                 path=str(settings.chroma_persist_dir)
             )
-        self._embed = _embedding_function(settings.embedding_model)
+        self._embed = embedding_function or _embedding_function(
+            settings.embedding_model
+        )
+        # Per-tenant BM25 indexes, lazily (re)built from the persisted corpus.
+        self._bm25: dict[str, _Bm25Index] = {}
+        self._bm25_lock = threading.Lock()
 
     @staticmethod
     def collection_name(tenant_id: str) -> str:
@@ -130,7 +205,7 @@ class TenantVectorStore:
         """
         return self._client.get_or_create_collection(
             name=self.collection_name(tenant_id),
-            embedding_function=self._embed,  # type: ignore[arg-type]
+            embedding_function=self._embed,
             metadata={"hnsw:space": "cosine", "tenant_id": tenant_id},
         )
 
@@ -173,6 +248,116 @@ class TenantVectorStore:
             tenant_id,
             chunks[0].document_id,
         )
+        # BM25 needs the full corpus, not a single embedding, so rebuild the
+        # tenant's keyword index now that its collection has grown.
+        self._rebuild_bm25(tenant_id)
+
+    def _rebuild_bm25(self, tenant_id: str) -> None:
+        """Rebuild the tenant's BM25 index from the persisted Chroma corpus.
+
+        Chroma is the source of truth; this reads every chunk for the tenant and
+        refits BM25 so the keyword view always reflects the full corpus (and is
+        recoverable after a process restart).
+
+        Args:
+            tenant_id: The tenant whose index to rebuild.
+        """
+        collection = self._collection(tenant_id)
+        data = collection.get(include=["documents", "metadatas"])
+        ids = data.get("ids") or []
+        if not ids:
+            with self._bm25_lock:
+                self._bm25.pop(tenant_id, None)
+            return
+
+        documents = [d or "" for d in (data.get("documents") or [])]
+        metadatas = data.get("metadatas") or []
+        doc_ids: list[str] = []
+        pages: list[int | None] = []
+        for meta in metadatas:
+            doc_ids.append(str(meta.get("document_id", "")) if meta else "")
+            page = meta.get("page_number", -1) if meta else -1
+            pages.append(_coerce_page(page))
+
+        index = _Bm25Index(
+            bm25=BM25Okapi([_tokenize(text) for text in documents]),
+            ids=list(ids),
+            documents=documents,
+            doc_ids=doc_ids,
+            pages=pages,
+        )
+        with self._bm25_lock:
+            self._bm25[tenant_id] = index
+        logger.info(
+            "Rebuilt BM25 index for tenant=%s corpus=%d", tenant_id, len(ids)
+        )
+
+    def bm25_query(
+        self,
+        tenant_id: str,
+        query_text: str,
+        *,
+        top_k: int = 10,
+        document_ids: list[str] | None = None,
+    ) -> list[RetrievedChunk]:
+        """Run a BM25 keyword query within the tenant's corpus.
+
+        Complements :meth:`query` (semantic): BM25 surfaces exact lexical matches
+        — article numbers, defined terms, identifiers like ``Section 4.1.a`` —
+        that vector similarity can miss. Returns the same :class:`RetrievedChunk`
+        shape so results fuse with vector results via the existing RRF.
+
+        Args:
+            tenant_id: The tenant identifier.
+            query_text: The query string.
+            top_k: Maximum number of chunks to return.
+            document_ids: Optional document subset to restrict the search to.
+
+        Returns:
+            Matching chunks ordered by descending BM25 relevance.
+        """
+        with self._bm25_lock:
+            index = self._bm25.get(tenant_id)
+        if index is None:
+            # Lazy build (e.g. after a restart, before any new ingestion).
+            self._rebuild_bm25(tenant_id)
+            with self._bm25_lock:
+                index = self._bm25.get(tenant_id)
+        if index is None:
+            return []
+
+        tokens = _tokenize(query_text)
+        if not tokens:
+            return []
+
+        scores = index.bm25.get_scores(tokens)
+        allowed = set(document_ids) if document_ids else None
+        ranked = sorted(
+            (
+                (position, float(score))
+                for position, score in enumerate(scores)
+                if score > 0
+                and (allowed is None or index.doc_ids[position] in allowed)
+            ),
+            key=lambda pair: pair[1],
+            reverse=True,
+        )
+
+        results: list[RetrievedChunk] = []
+        for position, score in ranked[:top_k]:
+            results.append(
+                RetrievedChunk(
+                    chunk_id=index.ids[position],
+                    document_id=index.doc_ids[position],
+                    page_number=index.pages[position],
+                    text=index.documents[position],
+                    # Map relevance to a pseudo-distance (lower = better) so the
+                    # field stays consistent with vector hits; only rank order
+                    # matters to RRF.
+                    distance=1.0 / (1.0 + score),
+                )
+            )
+        return results
 
     def query(
         self,
@@ -212,7 +397,7 @@ class TenantVectorStore:
         result = collection.query(
             query_texts=[query_text],
             n_results=min(top_k, collection.count()),
-            where=where,
+            where=where,  # type: ignore[arg-type]
             include=["documents", "metadatas", "distances"],
         )
         return self._unpack(result)
@@ -239,7 +424,7 @@ class TenantVectorStore:
                 RetrievedChunk(
                     chunk_id=chunk_id,
                     document_id=str(meta.get("document_id", "")) if meta else "",
-                    page_number=None if page in (-1, None) else int(page),
+                    page_number=_coerce_page(page),
                     text=text or "",
                     distance=float(dist),
                 )
@@ -257,4 +442,6 @@ class TenantVectorStore:
         collection.delete(
             where={"$and": [{"tenant_id": tenant_id}, {"document_id": document_id}]}
         )
+        # Keep the keyword index consistent with the shrunk corpus.
+        self._rebuild_bm25(tenant_id)
         logger.info("Deleted chunks for tenant=%s document=%s", tenant_id, document_id)

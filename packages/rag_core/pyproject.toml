@@ -27,6 +27,9 @@ dependencies = [
     "langchain-text-splitters>=0.2",
     "chromadb>=0.5",
     "sentence-transformers>=2.7",
+    # Lexical (keyword) retrieval for hybrid search — pure Python, depends only
+    # on numpy (already required), so it adds no system/image weight.
+    "rank-bm25>=0.2.2",
     # LLM providers (interfaces resolved at runtime via factory)
     "langchain-core>=0.2",
     "langchain-openai>=0.1",
@@ -49,20 +52,8 @@ dev = [
 where = ["."]
 include = ["rag_core*"]
 
-[tool.ruff]
-line-length = 100
-target-version = "py311"
-
-[tool.ruff.lint]
-select = ["E", "F", "I", "N", "UP", "B", "C4", "SIM"]
-ignore = ["B008"]  # FastAPI dependency-injection idiom uses calls in defaults.
-
-[tool.mypy]
-python_version = "3.11"
-strict = true
-ignore_missing_imports = true
-plugins = ["pydantic.mypy"]
-
-[tool.pytest.ini_options]
-asyncio_mode = "auto"
-testpaths = ["../../tests"]
+# NOTE: ruff / mypy / pytest configuration lives ONLY in the repository-root
+# pyproject.toml so the monorepo has a single tooling authority. Keeping a
+# competing [tool.ruff] here would shadow the root config for files under this
+# package (ruff uses the nearest config), which silently dropped the root's
+# per-file-ignores. This file intentionally carries packaging metadata only.
