@@ -1,0 +1,25 @@
+# API service runtime dependencies.
+# rag_core is installed from the local monorepo package (see Dockerfile).
+fastapi>=0.111
+uvicorn[standard]>=0.30
+python-multipart>=0.0.9
+slowapi>=0.1.9
+pydantic>=2.6
+pydantic-settings>=2.2
+
+# rag_core dependencies (mirrored so the API image is self-contained).
+tenacity>=8.2
+pdfplumber>=0.11
+pytesseract>=0.3.10
+opencv-python-headless>=4.9
+Pillow>=10.2
+pypdf>=4.2
+python-magic>=0.4.27
+langchain-core>=0.2
+langchain-text-splitters>=0.2
+langchain-openai>=0.1
+langchain-anthropic>=0.1
+langchain-groq>=0.1
+langchain-google-genai>=1.0
+chromadb>=0.5
+sentence-transformers>=2.7

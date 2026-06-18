@@ -1,0 +1,34 @@
+# Root tooling configuration (this is NOT an installable package — rag_core
+# lives in packages/rag_core). Centralises ruff/mypy/pytest config so CI runs
+# the same rules across packages/, apps/api, and tests/.
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+extend-exclude = ["apps/web", ".next", "node_modules"]
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "N", "UP", "B", "C4", "SIM"]
+ignore = ["B008"]  # FastAPI Depends()/File() in defaults is idiomatic.
+
+[tool.ruff.lint.per-file-ignores]
+"tests/*" = ["N802", "SLF001"]  # test names + accessing _private in unit tests
+
+[tool.mypy]
+python_version = "3.11"
+strict = true
+ignore_missing_imports = true
+plugins = ["pydantic.mypy"]
+# Make the local package and the API app importable for type-checking.
+mypy_path = "packages/rag_core:apps/api"
+explicit_package_bases = true
+
+[[tool.mypy.overrides]]
+module = ["tests.*"]
+ignore_errors = true
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]
+pythonpath = ["packages/rag_core", "apps/api"]
+filterwarnings = ["ignore::DeprecationWarning"]

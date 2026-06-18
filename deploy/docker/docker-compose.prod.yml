@@ -1,0 +1,57 @@
+# Production stack for the DigitalOcean Droplet (Section 5).
+# Differences from the dev compose: no bind mounts / hot-reload, pinned image
+# tags pulled from a registry, and Caddy in front terminating TLS via Let's
+# Encrypt. Deployed only by the manual `deploy.yml` workflow.
+#
+#   docker compose -f docker-compose.prod.yml up -d
+services:
+  api:
+    image: ${REGISTRY:-ghcr.io/your-org}/sci-api:${IMAGE_TAG:-latest}
+    env_file:
+      - .env
+    environment:
+      ENVIRONMENT: production
+      CHROMA_PERSIST_DIR: /app/data/chroma
+      LOG_DIR: /app/logs
+    volumes:
+      - chroma-data:/app/data/chroma
+      - api-logs:/app/logs
+    expose:
+      - "8000"
+    restart: always
+
+  web:
+    image: ${REGISTRY:-ghcr.io/your-org}/sci-web:${IMAGE_TAG:-latest}
+    environment:
+      API_BASE_URL: http://api:8000
+      API_KEY: ${API_KEY}
+      ACCESS_CODE: ${ACCESS_CODE}
+      NODE_ENV: production
+    depends_on:
+      - api
+    expose:
+      - "3000"
+    restart: always
+
+  caddy:
+    image: caddy:2-alpine
+    depends_on:
+      - web
+      - api
+    ports:
+      - "80:80"
+      - "443:443"
+    environment:
+      # The domain claimed from the GitHub Student Pack (Section 5).
+      SITE_DOMAIN: ${SITE_DOMAIN:-localhost}
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy-data:/data
+      - caddy-config:/config
+    restart: always
+
+volumes:
+  chroma-data:
+  api-logs:
+  caddy-data:
+  caddy-config:

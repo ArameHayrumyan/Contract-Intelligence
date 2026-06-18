@@ -1,0 +1,15 @@
+# Caddy reverse proxy (Section 5).
+#
+# The API is intentionally NOT exposed publicly: the Next.js app is the only
+# client and reaches FastAPI over the internal Docker network (api:8000),
+# attaching the backend key + enforcing the access gate in its server-side proxy
+# routes (apps/web/app/api/**). Routing everything to the web app therefore
+# keeps the credential injection and gate on the only public path — and upholds
+# "the frontend never talks to rag_core directly" end to end.
+#
+# Caddy issues + renews Let's Encrypt certs automatically for SITE_DOMAIN.
+
+{$SITE_DOMAIN} {
+	encode gzip
+	reverse_proxy web:3000
+}
