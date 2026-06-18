@@ -16,7 +16,7 @@ from collections import defaultdict
 
 from langchain_core.language_models.chat_models import BaseChatModel
 from tenacity import (
-    retry,
+    Retrying,
     retry_if_exception_type,
     stop_after_attempt,
     wait_exponential,
@@ -71,7 +71,18 @@ def _is_retryable(exc: BaseException) -> bool:
     text = f"{type(exc).__name__}: {exc}".lower()
     return any(
         token in text
-        for token in ("rate limit", "429", "overloaded", "503", "timeout", "too many")
+        for token in (
+            "rate limit",
+            "429",
+            "overloaded",
+            "503",
+            "timeout",
+            "too many",
+            # Smaller models intermittently emit a malformed tool/function call
+            # that the provider rejects; a retry often succeeds.
+            "tool_use_failed",
+            "failed to call a function",
+        )
     )
 
 
@@ -135,7 +146,14 @@ class AuditEngine:
         *,
         document_ids: list[str] | None = None,
     ) -> list[RetrievedChunk]:
-        """Retrieve per variant and fuse with RRF.
+        """Retrieve per variant via hybrid search and fuse with RRF.
+
+        Each variant contributes two ranked lists — semantic (vector) and lexical
+        (BM25) — so RRF fuses ``2 * len(variants)`` lists (6 for the standard 3
+        variants). BM25 rescues exact references (article numbers, defined terms,
+        identifiers like ``Section 4.1.a``) that vector similarity smooths away;
+        the vector side keeps recall on paraphrased / semantically-stated terms.
+        The fusion function and ``k=60`` are unchanged.
 
         Args:
             tenant_id: The tenant whose collection to search.
@@ -145,20 +163,30 @@ class AuditEngine:
         Returns:
             Top ``FUSED_TOP_K`` fused chunks.
         """
-        ranked_lists = [
-            self._store.query(
-                tenant_id,
-                variant,
-                top_k=PER_VARIANT_TOP_K,
-                document_ids=document_ids,
+        ranked_lists: list[list[RetrievedChunk]] = []
+        for variant in variants:
+            ranked_lists.append(
+                self._store.query(
+                    tenant_id,
+                    variant,
+                    top_k=PER_VARIANT_TOP_K,
+                    document_ids=document_ids,
+                )
             )
-            for variant in variants
-        ]
+            ranked_lists.append(
+                self._store.bm25_query(
+                    tenant_id,
+                    variant,
+                    top_k=PER_VARIANT_TOP_K,
+                    document_ids=document_ids,
+                )
+            )
         fused = reciprocal_rank_fusion(ranked_lists)[:FUSED_TOP_K]
         logger.info(
-            "Fused retrieval tenant=%s variants=%d fused=%d",
+            "Hybrid retrieval tenant=%s variants=%d lists=%d fused=%d",
             tenant_id,
             len(variants),
+            len(ranked_lists),
             len(fused),
         )
         return fused
@@ -202,17 +230,28 @@ class AuditEngine:
         )
         return audit
 
-    @retry(
-        retry=retry_if_exception_type((RateLimitError, Exception)),
-        stop=stop_after_attempt(5),
-        wait=wait_exponential(multiplier=1, min=2, max=30),
-        reraise=True,
-    )
+    def _retrying(self) -> Retrying:
+        """Build the retry policy for transient (rate-limit / 5xx) LLM errors.
+
+        Backoff is deliberately patient: free tiers enforce a per-minute token
+        window (e.g. Groq's 6k TPM), so a burst can stay rate-limited for most of
+        a 60s window. Capping the wait at 60s and taking ``llm_max_retries``
+        attempts lets a single call outlast a saturated window instead of failing
+        the request. Only :class:`RateLimitError` is retried — non-retryable
+        errors (bad request, auth) surface immediately.
+
+        Returns:
+            A configured :class:`tenacity.Retrying`.
+        """
+        return Retrying(
+            retry=retry_if_exception_type(RateLimitError),
+            stop=stop_after_attempt(self._settings.llm_max_retries + 1),
+            wait=wait_exponential(multiplier=2, min=4, max=60),
+            reraise=True,
+        )
+
     def _generate_structured(self, prompt: str) -> ContractAuditSchema:
         """Invoke the LLM with structured-output binding, with retries.
-
-        The ``tenacity`` policy retries transient failures (rate limits, 5xx)
-        with exponential backoff — important on a free tier.
 
         Args:
             prompt: The fully-formed audit prompt.
@@ -223,6 +262,21 @@ class AuditEngine:
         Raises:
             Exception: Re-raised after the retry budget is exhausted, or
                 immediately for non-retryable errors.
+        """
+        return self._retrying()(self._invoke_structured, prompt)
+
+    def _invoke_structured(self, prompt: str) -> ContractAuditSchema:
+        """Single structured-output LLM call (one retry attempt).
+
+        Args:
+            prompt: The fully-formed audit prompt.
+
+        Returns:
+            The parsed :class:`ContractAuditSchema`.
+
+        Raises:
+            RateLimitError: For transient failures (triggers a retry).
+            Exception: Immediately for non-retryable errors.
         """
         try:
             structured = self._llm.with_structured_output(ContractAuditSchema)
@@ -303,12 +357,6 @@ class AuditEngine:
         ]
         return QAResponse(answer=answer, citations=citations)
 
-    @retry(
-        retry=retry_if_exception_type(RateLimitError),
-        stop=stop_after_attempt(5),
-        wait=wait_exponential(multiplier=1, min=2, max=30),
-        reraise=True,
-    )
     def _generate_answer(self, question: str, context: str) -> str:
         """Invoke the LLM for a grounded free-text answer, with retries.
 
@@ -318,6 +366,21 @@ class AuditEngine:
 
         Returns:
             The answer text.
+        """
+        return self._retrying()(self._invoke_answer, question, context)
+
+    def _invoke_answer(self, question: str, context: str) -> str:
+        """Single free-text LLM call (one retry attempt).
+
+        Args:
+            question: The user's question.
+            context: The formatted, citation-tagged context.
+
+        Returns:
+            The answer text.
+
+        Raises:
+            RateLimitError: For transient failures (triggers a retry).
         """
         prompt = (
             "You are a contract analyst. Answer the QUESTION using ONLY the "
@@ -388,11 +451,18 @@ class AuditEngine:
             "a single contract and produce a structured audit.\n\n"
             "Rules:\n"
             "- Base every field strictly on the CONTEXT; do not invent terms.\n"
+            "- Respect each field's type EXACTLY. Never put text such as "
+            "'Not specified' into a boolean or integer field:\n"
+            "  * vendor_name, contract_type, liability_cap_description (text): "
+            "if absent, use the string 'Not specified'.\n"
+            "  * auto_renewal (boolean): true or false only; if not stated, false.\n"
+            "  * notice_period_days (integer >= 0): the number of days; if not "
+            "stated, 0.\n"
+            "  * risk_score (integer 1-10): 1 negligible .. 10 severe; justify in "
+            "'risk_rationale'.\n"
             "- For each critical clause, set 'source_chunk_id' to the chunk_id of "
             "the excerpt the clause text came from.\n"
-            "- 'risk_score' is 1 (negligible) to 10 (severe). Justify it in "
-            "'risk_rationale'.\n"
-            "- If a field is genuinely absent, use a clear sentinel (e.g. "
-            "'Not specified') rather than guessing.\n\n"
+            "- If the document is not actually a contract, still return a valid "
+            "audit with the type-correct fallbacks above and a low risk_score.\n\n"
             f"CONTEXT:\n{context}"
         )
