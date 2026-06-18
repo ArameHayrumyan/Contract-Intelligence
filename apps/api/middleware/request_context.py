@@ -48,7 +48,7 @@ class RequestIdLogFilter(logging.Filter):
         return True
 
 
-class RequestContextMiddleware(BaseHTTPMiddleware):  # type: ignore[misc]
+class RequestContextMiddleware(BaseHTTPMiddleware):
     """Binds a request id to the log context and response headers."""
 
     async def dispatch(

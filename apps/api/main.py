@@ -83,7 +83,9 @@ def create_app() -> FastAPI:
 
     # Rate limiting (Section 6: cost-abuse controls).
     app.state.limiter = limiter
-    app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
+    # slowapi's handler is typed as (Request, RateLimitExceeded) -> Response,
+    # narrower than Starlette's (Request, Exception) handler type.
+    app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)  # type: ignore[arg-type]
     app.add_middleware(SlowAPIMiddleware)
 
     # Request correlation ids + structured log binding.
