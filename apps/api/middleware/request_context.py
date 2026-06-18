@@ -48,7 +48,7 @@ class RequestIdLogFilter(logging.Filter):
         return True
 
 
-class RequestContextMiddleware(BaseHTTPMiddleware):
+class RequestContextMiddleware(BaseHTTPMiddleware):  # type: ignore[misc]
     """Binds a request id to the log context and response headers."""
 
     async def dispatch(
@@ -78,10 +78,16 @@ class RequestContextMiddleware(BaseHTTPMiddleware):
 
 
 def install_request_id_logging() -> None:
-    """Attach :class:`RequestIdLogFilter` to the ``rag_core`` logger tree.
+    """Attach :class:`RequestIdLogFilter` to the ``rag_core`` logger's handlers.
+
+    The filter must live on the handlers (not the logger) so it also applies to
+    records propagated up from child loggers (``rag_core.engine``,
+    ``rag_core.api.*``). On the handlers it overwrites ``request_id`` with the
+    live contextvar value (the per-request id, or ``"-"`` outside a request).
 
     Safe to call repeatedly; it will not stack duplicate filters.
     """
     logger = logging.getLogger("rag_core")
-    if not any(isinstance(f, RequestIdLogFilter) for f in logger.filters):
-        logger.addFilter(RequestIdLogFilter())
+    for handler in logger.handlers:
+        if not any(isinstance(f, RequestIdLogFilter) for f in handler.filters):
+            handler.addFilter(RequestIdLogFilter())
