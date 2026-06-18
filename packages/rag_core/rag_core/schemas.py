@@ -8,12 +8,12 @@ with "Auditor" in the name (Architectural Constraint #3).
 
 from __future__ import annotations
 
-from enum import Enum
+from enum import StrEnum
 
 from pydantic import BaseModel, Field
 
 
-class RiskBand(str, Enum):
+class RiskBand(StrEnum):
     """Human-readable banding aligned with the frontend ``RiskBadge`` colours."""
 
     LOW = "low"  # 1-3  (green)
@@ -96,7 +96,7 @@ class ContractAuditSchema(BaseModel):
         return RiskBand.from_score(self.risk_score)
 
 
-class DocumentStatus(str, Enum):
+class DocumentStatus(StrEnum):
     """Lifecycle states for an ingested document."""
 
     PENDING = "pending"

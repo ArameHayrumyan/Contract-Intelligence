@@ -11,8 +11,28 @@ extend-exclude = ["apps/web", ".next", "node_modules"]
 select = ["E", "F", "I", "N", "UP", "B", "C4", "SIM"]
 ignore = ["B008"]  # FastAPI Depends()/File() in defaults is idiomatic.
 
+[tool.ruff.lint.isort]
+# The API app's modules are top-level (not a package), and rag_core is the local
+# library — declare them first-party so imports group correctly instead of being
+# folded into the third-party block.
+known-first-party = [
+    "rag_core",
+    "conftest",
+    "dependencies",
+    "main",
+    "middleware",
+    "routers",
+    "runtime",
+    "service",
+]
+combine-as-imports = true
+
 [tool.ruff.lint.per-file-ignores]
 "tests/*" = ["N802", "SLF001"]  # test names + accessing _private in unit tests
+# Re-export facades: names (incl. those under `if TYPE_CHECKING`) exist purely so
+# type checkers and IDEs see the public surface; runtime resolution is via PEP
+# 562 __getattr__. F401 (unused import) is expected and intentional here.
+"__init__.py" = ["F401"]
 
 [tool.mypy]
 python_version = "3.11"
@@ -22,6 +42,9 @@ plugins = ["pydantic.mypy"]
 # Make the local package and the API app importable for type-checking.
 mypy_path = "packages/rag_core:apps/api"
 explicit_package_bases = true
+# FastAPI route decorators and slowapi's untyped `limiter.limit` would otherwise
+# trip `disallow_untyped_decorators` (part of strict); relax just that sub-flag.
+disallow_untyped_decorators = false
 
 [[tool.mypy.overrides]]
 module = ["tests.*"]

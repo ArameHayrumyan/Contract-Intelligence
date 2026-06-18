@@ -49,10 +49,10 @@ def _sniff_is_pdf(data: bytes) -> bool:
         ``True`` if the content looks like a PDF.
     """
     try:
-        import magic  # type: ignore[import-untyped]
+        import magic
 
         mime = magic.from_buffer(data[:2048], mime=True)
-        return mime == "application/pdf"
+        return bool(mime == "application/pdf")
     except Exception:  # pragma: no cover - libmagic optional / platform-specific
         logger.debug("libmagic unavailable; falling back to magic-byte sniff")
         return data[: len(_PDF_MAGIC)] == _PDF_MAGIC

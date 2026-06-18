@@ -21,8 +21,11 @@ from middleware.request_context import (
     RequestContextMiddleware,
     install_request_id_logging,
 )
-from rag_core.config import ConfigurationError, get_settings
-from rag_core.config import configure_logging as _configure_logging
+from rag_core.config import (
+    ConfigurationError,
+    configure_logging as _configure_logging,
+    get_settings,
+)
 from routers import audit, documents, qa
 from runtime import limiter
 from service import ContractService

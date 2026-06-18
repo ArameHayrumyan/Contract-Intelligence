@@ -211,7 +211,7 @@ class DocumentProcessor:
         _, binarised = cv2.threshold(
             gray, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU
         )
-        return pytesseract.image_to_string(binarised)
+        return str(pytesseract.image_to_string(binarised))
 
     @staticmethod
     def _normalise_headers(text: str) -> str:
