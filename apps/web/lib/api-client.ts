@@ -9,8 +9,11 @@
 
 import type {
   ContractAudit,
+  CrossReferenceAudit,
   QARequest,
   QAResponse,
+  StandardGroup,
+  StandardUploadResponse,
   StatusResponse,
   UploadResponse,
 } from "@/lib/types";
@@ -76,4 +79,40 @@ export async function askQuestion(payload: QARequest): Promise<QAResponse> {
     body: JSON.stringify(payload),
   });
   return parse<QAResponse>(res);
+}
+
+/** Upload a corporate standard (name + version + PDF). */
+export async function uploadStandard(
+  standardName: string,
+  standardVersion: string,
+  file: File,
+): Promise<StandardUploadResponse> {
+  const form = new FormData();
+  form.append("standard_name", standardName);
+  form.append("standard_version", standardVersion);
+  form.append("file", file);
+  const res = await fetch("/api/standards", { method: "POST", body: form });
+  return parse<StandardUploadResponse>(res);
+}
+
+/** List the tenant's standards, grouped by name with all versions. */
+export async function listStandards(): Promise<StandardGroup[]> {
+  const res = await fetch("/api/standards", { cache: "no-store" });
+  return parse<StandardGroup[]>(res);
+}
+
+/** Run a cross-reference audit of a document against a standard. */
+export async function runCrossReference(
+  documentId: string,
+  standardDocumentId: string,
+): Promise<CrossReferenceAudit> {
+  const res = await fetch(
+    `/api/documents/${encodeURIComponent(documentId)}/cross-reference`,
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ standard_document_id: standardDocumentId }),
+    },
+  );
+  return parse<CrossReferenceAudit>(res);
 }

@@ -161,3 +161,75 @@ textarea {
   align-items: center;
   justify-content: center;
 }
+
+.link-btn {
+  background: none;
+  border: none;
+  color: var(--accent);
+  cursor: pointer;
+  padding: 0;
+  font-size: 13px;
+}
+
+/* --- Deviation table (cross-reference) ----------------------------------- */
+.dev-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 14px;
+}
+
+.dev-table th,
+.dev-table td {
+  text-align: left;
+  padding: 8px 10px;
+  border-bottom: 1px solid var(--border);
+  vertical-align: top;
+}
+
+.dev-table th.sortable {
+  cursor: pointer;
+  user-select: none;
+}
+
+.dev-table td.sev {
+  font-weight: 700;
+  text-align: center;
+}
+
+.pill {
+  display: inline-block;
+  padding: 2px 8px;
+  border-radius: 999px;
+  font-size: 12px;
+  font-weight: 700;
+  color: #fff;
+}
+
+/* Row tint + pill color keyed to deviation type. */
+.dev--missing,
+.dev--contradictory {
+  background: rgba(214, 69, 61, 0.12);
+}
+.dev--weakened {
+  background: rgba(216, 147, 42, 0.12);
+}
+.dev--strengthened {
+  background: rgba(79, 140, 255, 0.1);
+}
+.dev--unaddressed {
+  background: rgba(147, 164, 194, 0.1);
+}
+
+.pill--missing,
+.pill--contradictory {
+  background: var(--red);
+}
+.pill--weakened {
+  background: var(--amber);
+}
+.pill--strengthened {
+  background: var(--accent);
+}
+.pill--unaddressed {
+  background: #6b7a99;
+}
