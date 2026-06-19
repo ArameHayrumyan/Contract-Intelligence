@@ -71,8 +71,48 @@ class FakeStore:
     def query(self, *args: Any, **kwargs: Any) -> list[Any]:  # pragma: no cover
         return []
 
+    def bm25_query(self, *args: Any, **kwargs: Any) -> list[Any]:  # pragma: no cover
+        return []
+
     def delete_document(self, *args: Any, **kwargs: Any) -> None:  # pragma: no cover
         return None
+
+    # Standards surface (cross-reference workflow) — no-ops for unit tests.
+    def add_standard_chunks(self, tenant_id: str, chunks: list[Chunk], **_: Any) -> None:
+        if not chunks:
+            return
+        self.added.setdefault((tenant_id, chunks[0].document_id), []).extend(chunks)
+
+    def get_standard_version(self, *args: Any, **kwargs: Any) -> str:  # pragma: no cover
+        return ""
+
+    def get_document_chunks(self, *args: Any, **kwargs: Any) -> list[Any]:  # pragma: no cover
+        return []
+
+    def query_standards(self, *args: Any, **kwargs: Any) -> list[Any]:  # pragma: no cover
+        return []
+
+    def bm25_query_standards(self, *args: Any, **kwargs: Any) -> list[Any]:  # pragma: no cover
+        return []
+
+
+class FakeXrefEngine:
+    """Deterministic cross-reference engine returning a canned result."""
+
+    async def run(
+        self, subject_document_id: str, standard_document_id: str, tenant_id: str
+    ) -> Any:
+        from rag_core.schemas_xref import CrossReferenceAuditSchema
+
+        return CrossReferenceAuditSchema(
+            subject_document_id=subject_document_id,
+            standard_document_id=standard_document_id,
+            standard_version="v1",
+            deviations=[],
+            overall_risk_score=1,
+            executive_summary="No deviations.",
+            tenant_id=tenant_id,
+        )
 
 
 class FakeEngine:
@@ -134,6 +174,7 @@ def service(settings: Settings, monkeypatch: pytest.MonkeyPatch):  # type: ignor
         settings=settings,
         store=FakeStore(),  # type: ignore[arg-type]
         engine=FakeEngine(),  # type: ignore[arg-type]
+        xref_engine=FakeXrefEngine(),  # type: ignore[arg-type]
         synchronous=True,
     )
 
