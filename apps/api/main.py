@@ -26,7 +26,7 @@ from rag_core.config import (
     configure_logging as _configure_logging,
     get_settings,
 )
-from routers import audit, documents, qa
+from routers import audit, crossref, documents, qa, standards
 from runtime import limiter
 from service import ContractService
 
@@ -103,6 +103,8 @@ def create_app() -> FastAPI:
     app.include_router(documents.router)
     app.include_router(audit.router)
     app.include_router(qa.router)
+    app.include_router(standards.router)
+    app.include_router(crossref.router)
 
     @app.get("/health", tags=["meta"])
     async def health() -> dict[str, str]:
