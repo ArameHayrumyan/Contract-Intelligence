@@ -96,7 +96,7 @@ async def upload_document(
     except UploadValidationError as exc:
         logger.warning("Upload rejected (%s): %s", exc.reason, exc)
         raise HTTPException(
-            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
             detail={"reason": exc.reason, "message": str(exc)},
         ) from exc
 
