@@ -11,6 +11,7 @@ Embeddings use ``BAAI/bge-small-en-v1.5`` locally — no external call, no key.
 
 from __future__ import annotations
 
+import json
 import logging
 import re
 import threading
@@ -75,6 +76,44 @@ def _coerce_page(value: object) -> int | None:
     return None
 
 
+def _load_json_rows(value: object) -> list[str]:
+    """Decode a JSON-encoded list of strings from Chroma metadata.
+
+    Args:
+        value: The raw metadata value (a JSON string, or ``None``).
+
+    Returns:
+        The decoded list, or ``[]`` on missing / malformed data.
+    """
+    if not isinstance(value, str) or not value:
+        return []
+    try:
+        decoded = json.loads(value)
+    except json.JSONDecodeError:
+        return []
+    return [str(item) for item in decoded] if isinstance(decoded, list) else []
+
+
+def _load_json_grid(value: object) -> list[list[str]]:
+    """Decode a JSON-encoded list-of-lists of strings from Chroma metadata.
+
+    Args:
+        value: The raw metadata value (a JSON string, or ``None``).
+
+    Returns:
+        The decoded grid, or ``[]`` on missing / malformed data.
+    """
+    if not isinstance(value, str) or not value:
+        return []
+    try:
+        decoded = json.loads(value)
+    except json.JSONDecodeError:
+        return []
+    if not isinstance(decoded, list):
+        return []
+    return [[str(cell) for cell in row] for row in decoded if isinstance(row, list)]
+
+
 @dataclass(frozen=True)
 class RetrievedChunk:
     """A chunk returned from a similarity query.
@@ -115,6 +154,34 @@ class _Bm25Index:
     documents: list[str]
     doc_ids: list[str]
     pages: list[int | None]
+
+
+def _chunk_metadata(chunk: Chunk, **extra: str) -> dict[str, str | int]:
+    """Build the Chroma metadata dict for a chunk (shared by both collections).
+
+    Table structure is stored as JSON strings (Chroma cannot hold lists), so
+    cross-referencing can recover cells for direct comparison. All values are
+    Chroma-safe scalars (str / int).
+
+    Args:
+        chunk: The chunk being persisted.
+        **extra: Additional kind-specific string metadata (e.g. standard version).
+
+    Returns:
+        A Chroma-safe metadata mapping.
+    """
+    meta: dict[str, str | int] = {
+        "document_id": chunk.document_id,
+        "tenant_id": chunk.tenant_id,
+        # Chroma metadata cannot hold None; sentinel -1 means unknown.
+        "page_number": chunk.page_number if chunk.page_number is not None else -1,
+        "element_type": chunk.element_type.value,
+        "extraction_method": chunk.extraction_method.value,
+        "column_headers": json.dumps(chunk.column_headers),
+        "structured_data": json.dumps(chunk.structured_data),
+    }
+    meta.update(extra)
+    return meta
 
 
 def _validate_tenant_id(tenant_id: str) -> None:
@@ -242,15 +309,7 @@ class TenantVectorStore:
         collection.add(
             ids=[c.chunk_id for c in chunks],
             documents=[c.text for c in chunks],
-            metadatas=[
-                {
-                    "document_id": c.document_id,
-                    "tenant_id": c.tenant_id,
-                    # Chroma metadata cannot hold None; sentinel -1 means unknown.
-                    "page_number": c.page_number if c.page_number is not None else -1,
-                }
-                for c in chunks
-            ],
+            metadatas=[_chunk_metadata(c) for c in chunks],
         )
         logger.info(
             "Persisted %d chunks for tenant=%s document=%s",
@@ -504,13 +563,11 @@ class TenantVectorStore:
             ids=[c.chunk_id for c in chunks],
             documents=[c.text for c in chunks],
             metadatas=[
-                {
-                    "document_id": c.document_id,
-                    "tenant_id": c.tenant_id,
-                    "page_number": c.page_number if c.page_number is not None else -1,
-                    "standard_version": standard_version,
-                    "standard_name": standard_name,
-                }
+                _chunk_metadata(
+                    c,
+                    standard_version=standard_version,
+                    standard_name=standard_name,
+                )
                 for c in chunks
             ],
         )
@@ -641,3 +698,38 @@ class TenantVectorStore:
                 )
             )
         return chunks
+
+    def get_element_metadata(
+        self, tenant_id: str, chunk_id: str, *, kind: str = KIND_CONTRACTS
+    ) -> dict[str, object]:
+        """Look up a chunk's element metadata by id (for table cell comparison).
+
+        Returns the parsed table structure so the cross-reference engine can diff
+        cells directly without inflating :class:`RetrievedChunk` or touching the
+        BM25 index. Keeping this off the retrieval path means table data is
+        fetched only for the handful of clause pairs actually being classified.
+
+        Args:
+            tenant_id: The tenant identifier.
+            chunk_id: The chunk id to look up.
+            kind: Which collection the chunk lives in.
+
+        Returns:
+            ``{element_type: str, column_headers: list[str],
+            structured_data: list[list[str]]}`` — defaults for an unknown chunk.
+        """
+        collection = self._collection(tenant_id, kind)
+        data = collection.get(
+            ids=[chunk_id],
+            where={"tenant_id": tenant_id},  # tenant scoping, defence in depth
+            include=["metadatas"],
+        )
+        metas = data.get("metadatas") or []
+        if not metas or not metas[0]:
+            return {"element_type": "text", "column_headers": [], "structured_data": []}
+        meta = metas[0]
+        return {
+            "element_type": str(meta.get("element_type", "text")),
+            "column_headers": _load_json_rows(meta.get("column_headers")),
+            "structured_data": _load_json_grid(meta.get("structured_data")),
+        }
