@@ -86,20 +86,48 @@ def _is_retryable(exc: BaseException) -> bool:
     )
 
 
-def reciprocal_rank_fusion(
+def build_retrying(max_retries: int) -> Retrying:
+    """Build the shared retry policy for transient (rate-limit / 5xx) LLM errors.
+
+    Backoff is deliberately patient: free tiers enforce a per-minute token window
+    (e.g. Groq's 6k TPM), so a burst can stay rate-limited for most of a 60s
+    window. Capping the wait at 60s over ``max_retries`` attempts lets a single
+    call outlast a saturated window instead of failing. Only
+    :class:`RateLimitError` is retried — non-retryable errors surface immediately.
+
+    Both :class:`AuditEngine` and the cross-reference engine use this one policy.
+
+    Args:
+        max_retries: Number of retries (total attempts is this + 1).
+
+    Returns:
+        A configured :class:`tenacity.Retrying`.
+    """
+    return Retrying(
+        retry=retry_if_exception_type(RateLimitError),
+        stop=stop_after_attempt(max_retries + 1),
+        wait=wait_exponential(multiplier=2, min=4, max=60),
+        reraise=True,
+    )
+
+
+def reciprocal_rank_fusion_scored(
     ranked_lists: list[list[RetrievedChunk]], *, k: int = RRF_K
-) -> list[RetrievedChunk]:
-    """Fuse several ranked chunk lists via Reciprocal Rank Fusion.
+) -> list[tuple[RetrievedChunk, float]]:
+    """Fuse several ranked chunk lists via RRF, returning the fused scores.
 
     Each chunk's fused score is ``sum(1 / (k + rank))`` over the lists it appears
-    in (rank is 0-based). Duplicate chunk ids are merged.
+    in (rank is 0-based). Duplicate chunk ids are merged. This is the single
+    implementation of the algorithm; :func:`reciprocal_rank_fusion` drops the
+    scores, and the cross-reference engine uses the scores to threshold whether a
+    clause has a counterpart in the standard.
 
     Args:
         ranked_lists: One ranked list of chunks per query variant.
         k: RRF damping constant.
 
     Returns:
-        Chunks sorted by descending fused score.
+        ``(chunk, fused_score)`` pairs sorted by descending fused score.
     """
     scores: dict[str, float] = defaultdict(float)
     representative: dict[str, RetrievedChunk] = {}
@@ -113,7 +141,25 @@ def reciprocal_rank_fusion(
                 representative[chunk.chunk_id] = chunk
 
     ordered_ids = sorted(scores, key=lambda cid: scores[cid], reverse=True)
-    return [representative[cid] for cid in ordered_ids]
+    return [(representative[cid], scores[cid]) for cid in ordered_ids]
+
+
+def reciprocal_rank_fusion(
+    ranked_lists: list[list[RetrievedChunk]], *, k: int = RRF_K
+) -> list[RetrievedChunk]:
+    """Fuse several ranked chunk lists via Reciprocal Rank Fusion.
+
+    Thin wrapper over :func:`reciprocal_rank_fusion_scored` that drops the
+    scores. Behaviour is unchanged for existing callers.
+
+    Args:
+        ranked_lists: One ranked list of chunks per query variant.
+        k: RRF damping constant.
+
+    Returns:
+        Chunks sorted by descending fused score.
+    """
+    return [chunk for chunk, _ in reciprocal_rank_fusion_scored(ranked_lists, k=k)]
 
 
 class AuditEngine:
@@ -231,24 +277,12 @@ class AuditEngine:
         return audit
 
     def _retrying(self) -> Retrying:
-        """Build the retry policy for transient (rate-limit / 5xx) LLM errors.
-
-        Backoff is deliberately patient: free tiers enforce a per-minute token
-        window (e.g. Groq's 6k TPM), so a burst can stay rate-limited for most of
-        a 60s window. Capping the wait at 60s and taking ``llm_max_retries``
-        attempts lets a single call outlast a saturated window instead of failing
-        the request. Only :class:`RateLimitError` is retried — non-retryable
-        errors (bad request, auth) surface immediately.
+        """Return the shared transient-error retry policy.
 
         Returns:
             A configured :class:`tenacity.Retrying`.
         """
-        return Retrying(
-            retry=retry_if_exception_type(RateLimitError),
-            stop=stop_after_attempt(self._settings.llm_max_retries + 1),
-            wait=wait_exponential(multiplier=2, min=4, max=60),
-            reraise=True,
-        )
+        return build_retrying(self._settings.llm_max_retries)
 
     def _generate_structured(self, prompt: str) -> ContractAuditSchema:
         """Invoke the LLM with structured-output binding, with retries.

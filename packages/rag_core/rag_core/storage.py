@@ -31,6 +31,13 @@ logger = logging.getLogger("rag_core.storage")
 #: Tenant ids must be safe to embed in a collection name.
 _TENANT_ID_RE = re.compile(r"^[a-zA-Z0-9_-]{1,64}$")
 
+#: Collection "kinds" — each tenant has one collection per kind. Contracts (the
+#: subject documents) and standards (the corporate reference policies) are kept
+#: in separate collections so a contract is never retrieved as if it were a
+#: standard, and vice versa.
+KIND_CONTRACTS = "contracts"
+KIND_STANDARDS = "standards"
+
 #: Token pattern that preserves dotted/hyphenated legal identifiers as a single
 #: token (e.g. "4.1.a", "section-12b") so BM25 can match exact references that a
 #: naive word-split — or a semantic embedding — would shatter or smooth away.
@@ -177,34 +184,37 @@ class TenantVectorStore:
         self._embed = embedding_function or _embedding_function(
             settings.embedding_model
         )
-        # Per-tenant BM25 indexes, lazily (re)built from the persisted corpus.
-        self._bm25: dict[str, _Bm25Index] = {}
+        # Per-(tenant, kind) BM25 indexes, lazily (re)built from the corpus.
+        self._bm25: dict[tuple[str, str], _Bm25Index] = {}
         self._bm25_lock = threading.Lock()
 
     @staticmethod
-    def collection_name(tenant_id: str) -> str:
-        """Return the namespaced collection name for a tenant.
+    def collection_name(tenant_id: str, kind: str = KIND_CONTRACTS) -> str:
+        """Return the namespaced collection name for a tenant and kind.
 
         Args:
             tenant_id: The tenant identifier.
+            kind: ``KIND_CONTRACTS`` or ``KIND_STANDARDS``.
 
         Returns:
-            The collection name, e.g. ``tenant_acme_contracts``.
+            The collection name, e.g. ``tenant_acme_contracts`` or
+            ``tenant_acme_standards``.
         """
         _validate_tenant_id(tenant_id)
-        return f"tenant_{tenant_id}_contracts"
+        return f"tenant_{tenant_id}_{kind}"
 
-    def _collection(self, tenant_id: str) -> Collection:
-        """Get-or-create the tenant's collection.
+    def _collection(self, tenant_id: str, kind: str = KIND_CONTRACTS) -> Collection:
+        """Get-or-create the tenant's collection for a kind.
 
         Args:
             tenant_id: The tenant identifier.
+            kind: ``KIND_CONTRACTS`` or ``KIND_STANDARDS``.
 
         Returns:
-            The Chroma :class:`Collection` for the tenant.
+            The Chroma :class:`Collection` for the tenant and kind.
         """
         return self._client.get_or_create_collection(
-            name=self.collection_name(tenant_id),
+            name=self.collection_name(tenant_id, kind),
             embedding_function=self._embed,
             metadata={"hnsw:space": "cosine", "tenant_id": tenant_id},
         )
@@ -252,8 +262,8 @@ class TenantVectorStore:
         # tenant's keyword index now that its collection has grown.
         self._rebuild_bm25(tenant_id)
 
-    def _rebuild_bm25(self, tenant_id: str) -> None:
-        """Rebuild the tenant's BM25 index from the persisted Chroma corpus.
+    def _rebuild_bm25(self, tenant_id: str, kind: str = KIND_CONTRACTS) -> None:
+        """Rebuild a (tenant, kind) BM25 index from the persisted Chroma corpus.
 
         Chroma is the source of truth; this reads every chunk for the tenant and
         refits BM25 so the keyword view always reflects the full corpus (and is
@@ -261,13 +271,14 @@ class TenantVectorStore:
 
         Args:
             tenant_id: The tenant whose index to rebuild.
+            kind: ``KIND_CONTRACTS`` or ``KIND_STANDARDS``.
         """
-        collection = self._collection(tenant_id)
+        collection = self._collection(tenant_id, kind)
         data = collection.get(include=["documents", "metadatas"])
         ids = data.get("ids") or []
         if not ids:
             with self._bm25_lock:
-                self._bm25.pop(tenant_id, None)
+                self._bm25.pop((tenant_id, kind), None)
             return
 
         documents = [d or "" for d in (data.get("documents") or [])]
@@ -287,9 +298,12 @@ class TenantVectorStore:
             pages=pages,
         )
         with self._bm25_lock:
-            self._bm25[tenant_id] = index
+            self._bm25[(tenant_id, kind)] = index
         logger.info(
-            "Rebuilt BM25 index for tenant=%s corpus=%d", tenant_id, len(ids)
+            "Rebuilt BM25 index for tenant=%s kind=%s corpus=%d",
+            tenant_id,
+            kind,
+            len(ids),
         )
 
     def bm25_query(
@@ -299,6 +313,7 @@ class TenantVectorStore:
         *,
         top_k: int = 10,
         document_ids: list[str] | None = None,
+        kind: str = KIND_CONTRACTS,
     ) -> list[RetrievedChunk]:
         """Run a BM25 keyword query within the tenant's corpus.
 
@@ -312,17 +327,18 @@ class TenantVectorStore:
             query_text: The query string.
             top_k: Maximum number of chunks to return.
             document_ids: Optional document subset to restrict the search to.
+            kind: Which collection to search (contracts or standards).
 
         Returns:
             Matching chunks ordered by descending BM25 relevance.
         """
         with self._bm25_lock:
-            index = self._bm25.get(tenant_id)
+            index = self._bm25.get((tenant_id, kind))
         if index is None:
             # Lazy build (e.g. after a restart, before any new ingestion).
-            self._rebuild_bm25(tenant_id)
+            self._rebuild_bm25(tenant_id, kind)
             with self._bm25_lock:
-                index = self._bm25.get(tenant_id)
+                index = self._bm25.get((tenant_id, kind))
         if index is None:
             return []
 
@@ -366,6 +382,7 @@ class TenantVectorStore:
         *,
         top_k: int = 10,
         document_ids: list[str] | None = None,
+        kind: str = KIND_CONTRACTS,
     ) -> list[RetrievedChunk]:
         """Run a similarity query within the tenant's collection.
 
@@ -377,11 +394,12 @@ class TenantVectorStore:
             query_text: The query string.
             top_k: Maximum number of chunks to return.
             document_ids: Optional document subset to restrict the search to.
+            kind: Which collection to search (contracts or standards).
 
         Returns:
             Matching chunks ordered by ascending distance.
         """
-        collection = self._collection(tenant_id)
+        collection = self._collection(tenant_id, kind)
         if collection.count() == 0:
             return []
 
@@ -445,3 +463,181 @@ class TenantVectorStore:
         # Keep the keyword index consistent with the shrunk corpus.
         self._rebuild_bm25(tenant_id)
         logger.info("Deleted chunks for tenant=%s document=%s", tenant_id, document_id)
+
+    # --- Standards (corporate reference policies) ----------------------------
+
+    def add_standard_chunks(
+        self,
+        tenant_id: str,
+        chunks: list[Chunk],
+        *,
+        standard_version: str,
+        standard_name: str,
+    ) -> None:
+        """Persist chunks of a standard document into the standards collection.
+
+        Each chunk's ``document_id`` is the ``standard_document_id``; the version
+        and name are constant for the upload and stored on every chunk so the
+        listing endpoint can group versions without a side table. Standards are
+        append-only and versioned — a new version is a new ``standard_document_id``
+        and never overwrites a previous one.
+
+        Args:
+            tenant_id: The owning tenant (must match every chunk).
+            chunks: Chunks to persist (``document_id`` == standard document id).
+            standard_version: Version label for this standard document.
+            standard_name: Human-readable standard name (grouping key).
+
+        Raises:
+            ValueError: If any chunk's ``tenant_id`` does not match ``tenant_id``.
+        """
+        if not chunks:
+            return
+        mismatched = [c.chunk_id for c in chunks if c.tenant_id != tenant_id]
+        if mismatched:
+            raise ValueError(
+                f"Refusing cross-tenant standard write; mismatched: {mismatched}"
+            )
+
+        collection = self._collection(tenant_id, KIND_STANDARDS)
+        collection.add(
+            ids=[c.chunk_id for c in chunks],
+            documents=[c.text for c in chunks],
+            metadatas=[
+                {
+                    "document_id": c.document_id,
+                    "tenant_id": c.tenant_id,
+                    "page_number": c.page_number if c.page_number is not None else -1,
+                    "standard_version": standard_version,
+                    "standard_name": standard_name,
+                }
+                for c in chunks
+            ],
+        )
+        self._rebuild_bm25(tenant_id, KIND_STANDARDS)
+        logger.info(
+            "Persisted %d standard chunks tenant=%s standard=%s version=%s",
+            len(chunks),
+            tenant_id,
+            chunks[0].document_id,
+            standard_version,
+        )
+
+    def query_standards(
+        self,
+        tenant_id: str,
+        query_text: str,
+        *,
+        standard_document_id: str,
+        top_k: int = 10,
+    ) -> list[RetrievedChunk]:
+        """Vector search within a single standard document.
+
+        Args:
+            tenant_id: The tenant identifier.
+            query_text: The query string.
+            standard_document_id: Restrict the search to this standard version.
+            top_k: Maximum number of chunks to return.
+
+        Returns:
+            Matching standard chunks ordered by ascending distance.
+        """
+        return self.query(
+            tenant_id,
+            query_text,
+            top_k=top_k,
+            document_ids=[standard_document_id],
+            kind=KIND_STANDARDS,
+        )
+
+    def bm25_query_standards(
+        self,
+        tenant_id: str,
+        query_text: str,
+        *,
+        standard_document_id: str,
+        top_k: int = 10,
+    ) -> list[RetrievedChunk]:
+        """BM25 keyword search within a single standard document.
+
+        Args:
+            tenant_id: The tenant identifier.
+            query_text: The query string.
+            standard_document_id: Restrict the search to this standard version.
+            top_k: Maximum number of chunks to return.
+
+        Returns:
+            Matching standard chunks ordered by descending BM25 relevance.
+        """
+        return self.bm25_query(
+            tenant_id,
+            query_text,
+            top_k=top_k,
+            document_ids=[standard_document_id],
+            kind=KIND_STANDARDS,
+        )
+
+    def get_standard_version(self, tenant_id: str, standard_document_id: str) -> str:
+        """Return the version label stored on a standard document's chunks.
+
+        Args:
+            tenant_id: The tenant identifier.
+            standard_document_id: The standard document id.
+
+        Returns:
+            The version label, or ``""`` if the standard is unknown.
+        """
+        collection = self._collection(tenant_id, KIND_STANDARDS)
+        data = collection.get(
+            where={
+                "$and": [
+                    {"tenant_id": tenant_id},
+                    {"document_id": standard_document_id},
+                ]
+            },
+            include=["metadatas"],
+            limit=1,
+        )
+        metas = data.get("metadatas") or []
+        if metas and metas[0]:
+            return str(metas[0].get("standard_version", ""))
+        return ""
+
+    def get_document_chunks(
+        self,
+        tenant_id: str,
+        document_id: str,
+        *,
+        kind: str = KIND_CONTRACTS,
+    ) -> list[RetrievedChunk]:
+        """Return every persisted chunk of one document (for inventory phases).
+
+        Args:
+            tenant_id: The tenant identifier.
+            document_id: The document (or standard) id to read.
+            kind: Which collection to read from.
+
+        Returns:
+            All chunks for the document (``distance`` is 0.0 — not a ranking).
+        """
+        collection = self._collection(tenant_id, kind)
+        data = collection.get(
+            where={"$and": [{"tenant_id": tenant_id}, {"document_id": document_id}]},
+            include=["documents", "metadatas"],
+        )
+        ids = data.get("ids") or []
+        docs = data.get("documents") or []
+        metas = data.get("metadatas") or []
+        chunks: list[RetrievedChunk] = []
+        for chunk_id, text, meta in zip(ids, docs, metas, strict=False):
+            page = meta.get("page_number", -1) if meta else -1
+            chunks.append(
+                RetrievedChunk(
+                    chunk_id=chunk_id,
+                    document_id=document_id,
+                    page_number=_coerce_page(page),
+                    text=text or "",
+                    distance=0.0,
+                )
+            )
+        return chunks
