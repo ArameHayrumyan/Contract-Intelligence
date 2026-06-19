@@ -89,6 +89,9 @@ class FakeStore:
     def get_document_chunks(self, *args: Any, **kwargs: Any) -> list[Any]:  # pragma: no cover
         return []
 
+    def get_element_metadata(self, *args: Any, **kwargs: Any) -> dict[str, Any]:  # pragma: no cover
+        return {"element_type": "text", "column_headers": [], "structured_data": []}
+
     def query_standards(self, *args: Any, **kwargs: Any) -> list[Any]:  # pragma: no cover
         return []
 
@@ -167,7 +170,6 @@ def settings() -> Settings:
 @pytest.fixture()
 def service(settings: Settings, monkeypatch: pytest.MonkeyPatch):  # type: ignore[no-untyped-def]
     """Build a synchronous ContractService with fakes injected."""
-    from rag_core.processor import ProcessingResult
     from service import ContractService
 
     svc = ContractService(
@@ -178,10 +180,12 @@ def service(settings: Settings, monkeypatch: pytest.MonkeyPatch):  # type: ignor
         synchronous=True,
     )
 
-    # Replace the real PDF processor with a deterministic stub so ingestion
-    # produces chunks without needing OCR/text-bearing PDFs.
-    def fake_process(*, data: bytes, document_id: str, tenant_id: str) -> ProcessingResult:
-        chunks = [
+    # Bypass the real tiered parser (camelot/pymupdf, temp files) with a
+    # deterministic chunk so ingestion tests don't need PDF parsers installed.
+    def fake_parse_to_chunks(
+        data: bytes, document_id: str, tenant_id: str
+    ) -> list[Chunk]:
+        return [
             Chunk(
                 chunk_id="chunk-1",
                 document_id=document_id,
@@ -190,9 +194,8 @@ def service(settings: Settings, monkeypatch: pytest.MonkeyPatch):  # type: ignor
                 text="This agreement renews automatically.",
             )
         ]
-        return ProcessingResult(chunks=chunks, pages_ocr=0, page_count=1)
 
-    monkeypatch.setattr(svc._processor, "process", fake_process)
+    monkeypatch.setattr(svc, "_parse_to_chunks", fake_parse_to_chunks)
     return svc
 
 

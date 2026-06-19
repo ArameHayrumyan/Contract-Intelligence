@@ -23,6 +23,13 @@ dependencies = [
     "pypdf>=4.2",
     "python-magic-bin>=0.4.14; platform_system == 'Windows'",
     "python-magic>=0.4.27; platform_system != 'Windows'",
+    # Tiered table / layout extraction (CPU-only, no model downloads).
+    # NOTE: camelot-py WITHOUT the [cv] extra — that extra pulls a second,
+    # conflicting opencv-python; we reuse the opencv-python-headless above.
+    # Needs the `ghostscript` system binary (installed in the API Dockerfile).
+    "camelot-py>=0.11",
+    "pymupdf>=1.24",  # bounding-box text extraction for multi-column reconstruction
+    "img2table>=1.3",  # table detection on scanned-page images (OCR path)
     # Chunking / embeddings / vector store
     "langchain-text-splitters>=0.2",
     "chromadb>=0.5",
@@ -46,6 +53,7 @@ dev = [
     "pytest-asyncio>=0.23",
     "httpx>=0.27",
     "types-Pillow",
+    "reportlab>=4.0",  # programmatic PDF fixtures for parser tests
 ]
 
 [tool.setuptools.packages.find]

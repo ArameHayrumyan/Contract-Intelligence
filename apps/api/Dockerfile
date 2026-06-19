@@ -10,13 +10,15 @@ ENV PYTHONUNBUFFERED=1 \
     PIP_NO_CACHE_DIR=1 \
     PIP_DISABLE_PIP_VERSION_CHECK=1
 
-# System deps: tesseract (OCR), libmagic (MIME sniff), libGL/glib (OpenCV).
+# System deps: tesseract (OCR), libmagic (MIME sniff), libGL/glib (OpenCV),
+# ghostscript (camelot lattice table extraction).
 RUN apt-get update && apt-get install -y --no-install-recommends \
         tesseract-ocr \
         libmagic1 \
         libgl1 \
         libglib2.0-0 \
         poppler-utils \
+        ghostscript \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
@@ -28,6 +30,10 @@ RUN pip install /app/packages/rag_core
 # API dependencies.
 COPY apps/api/requirements.txt /app/apps/api/requirements.txt
 RUN pip install -r /app/apps/api/requirements.txt
+
+# Fail the build immediately (not at first request) if any parser import is
+# broken — e.g. a missing ghostscript binding for camelot.
+RUN python -c "import camelot; import fitz; import img2table; print('parsers OK')"
 
 # Pre-download the embedding model into the image's HuggingFace cache so runtime
 # never depends on (or is rate-limited by) the HuggingFace Hub. Keep this id in

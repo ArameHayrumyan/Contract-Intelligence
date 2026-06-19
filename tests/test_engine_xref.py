@@ -87,6 +87,12 @@ class _FakeXrefStore:
     def get_standard_version(self, tenant_id: str, standard_document_id: str) -> str:
         return "v1"
 
+    def get_element_metadata(
+        self, tenant_id: str, chunk_id: str, *, kind: str = "contracts"
+    ) -> dict[str, Any]:
+        # Plain-text elements for these tests (table comparison covered elsewhere).
+        return {"element_type": "text", "column_headers": [], "structured_data": []}
+
     def query_standards(self, *args: Any, **kwargs: Any) -> list[RetrievedChunk]:
         return list(self._standards_match)
 

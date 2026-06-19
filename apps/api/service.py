@@ -16,6 +16,8 @@ The swap still touches only ``ingestion_queue.py`` (Constraint #5).
 from __future__ import annotations
 
 import logging
+import os
+import tempfile
 import threading
 import uuid
 from concurrent.futures import ThreadPoolExecutor
@@ -24,12 +26,15 @@ from rag_core.config import LLMProviderFactory, Settings
 from rag_core.engine import AuditEngine
 from rag_core.engine_xref import CrossReferenceEngine
 from rag_core.ingestion_queue import IngestionQueue, IngestJob, InProcessIngestionQueue
-from rag_core.processor import DocumentProcessor
+from rag_core.processor import DocumentParser
 from rag_core.schemas import (
+    Chunk,
     ContractAuditSchema,
     DocumentRecord,
     DocumentStatus,
     QAResponse,
+    TableElement,
+    TextElement,
 )
 from rag_core.schemas_xref import CrossReferenceAuditSchema, StandardRecord
 from rag_core.storage import TenantVectorStore
@@ -78,7 +83,7 @@ class ContractService:
                 deterministic behaviour).
         """
         self._settings = settings
-        self._processor = DocumentProcessor(settings)
+        self._parser = DocumentParser(settings)
         self._store = store or TenantVectorStore(settings)
 
         # Build the LLM once only if a real engine is actually needed. The
@@ -203,10 +208,8 @@ class ContractService:
 
         self._set_status(key, DocumentStatus.PROCESSING)
         try:
-            result = self._processor.process(
-                data=data, document_id=document_id, tenant_id=tenant_id
-            )
-            self._store.add_chunks(tenant_id, result.chunks)
+            chunks = self._parse_to_chunks(data, document_id, tenant_id)
+            self._store.add_chunks(tenant_id, chunks)
         except Exception as exc:  # noqa: BLE001 - record failure on the document
             self._fail(key, str(exc))
             raise
@@ -215,14 +218,86 @@ class ContractService:
                 self._pending.pop(key, None)
 
         with self._lock:
-            record.chunk_count = len(result.chunks)
+            record.chunk_count = len(chunks)
             record.status = DocumentStatus.READY
             record.error = None
         logger.info(
             "Ingestion finished tenant=%s document=%s chunks=%d",
             tenant_id,
             document_id,
-            len(result.chunks),
+            len(chunks),
+        )
+
+    def _parse_to_chunks(
+        self, data: bytes, document_id: str, tenant_id: str
+    ) -> list[Chunk]:
+        """Parse PDF bytes into persistable chunks via the tiered parser.
+
+        Camelot reads from disk, so the validated bytes are written to a
+        temporary file for the duration of parsing and removed afterwards.
+
+        Args:
+            data: Validated raw PDF bytes.
+            document_id: Owning document (or standard) id.
+            tenant_id: Owning tenant id.
+
+        Returns:
+            One :class:`Chunk` per parsed element (tables carry their grid).
+        """
+        handle, path = tempfile.mkstemp(suffix=".pdf")
+        try:
+            with os.fdopen(handle, "wb") as tmp:
+                tmp.write(data)
+            parsed = self._parser.parse(
+                pdf_path=path, document_id=document_id, tenant_id=tenant_id
+            )
+        finally:
+            try:
+                os.remove(path)
+            except OSError:
+                logger.warning("Could not remove temp PDF %s", path)
+        return [
+            self._element_to_chunk(element, document_id)
+            for element in parsed.elements
+        ]
+
+    @staticmethod
+    def _element_to_chunk(
+        element: TableElement | TextElement, document_id: str
+    ) -> Chunk:
+        """Convert a parsed element into a persistable :class:`Chunk`.
+
+        Tables store their markdown as the searchable ``text`` and carry the
+        grid (headers + cells) so cross-referencing can compare cells directly.
+        ``document_id`` is threaded in because elements don't carry it.
+
+        Args:
+            element: A ``TableElement`` or ``TextElement`` from the parser.
+            document_id: The owning document (or standard) id.
+
+        Returns:
+            The corresponding :class:`Chunk`.
+        """
+        if isinstance(element, TableElement):
+            return Chunk(
+                chunk_id=element.chunk_id,
+                document_id=document_id,
+                tenant_id=element.tenant_id,
+                page_number=element.page_number,
+                text=element.markdown_representation,
+                element_type=element.element_type,
+                extraction_method=element.extraction_method,
+                column_headers=element.column_headers,
+                structured_data=element.structured_data,
+            )
+        return Chunk(
+            chunk_id=element.chunk_id,
+            document_id=document_id,
+            tenant_id=element.tenant_id,
+            page_number=element.page_number,
+            text=element.text,
+            element_type=element.element_type,
+            extraction_method=element.extraction_method,
         )
 
     def _set_status(self, key: tuple[str, str], status: DocumentStatus) -> None:
@@ -379,12 +454,10 @@ class ContractService:
         with self._lock:
             record.status = DocumentStatus.PROCESSING.value
         try:
-            result = self._processor.process(
-                data=data, document_id=standard_document_id, tenant_id=tenant_id
-            )
+            chunks = self._parse_to_chunks(data, standard_document_id, tenant_id)
             self._store.add_standard_chunks(
                 tenant_id,
-                result.chunks,
+                chunks,
                 standard_version=version,
                 standard_name=name,
             )
@@ -398,14 +471,14 @@ class ContractService:
                 self._standards_pending.pop(key, None)
 
         with self._lock:
-            record.chunk_count = len(result.chunks)
+            record.chunk_count = len(chunks)
             record.status = DocumentStatus.READY.value
             record.error = None
         logger.info(
             "Standard ingested tenant=%s standard=%s chunks=%d",
             tenant_id,
             standard_document_id,
-            len(result.chunks),
+            len(chunks),
         )
 
     def list_standards(self, *, tenant_id: str) -> list[StandardRecord]:

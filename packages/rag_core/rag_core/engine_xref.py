@@ -91,6 +91,24 @@ DEVIATION_WEIGHTS: dict[DeviationType, float] = {
 }
 
 
+def _as_number(value: str) -> float | None:
+    """Parse a table cell as a number (ignoring %, $, commas), else ``None``.
+
+    Args:
+        value: A table cell.
+
+    Returns:
+        The numeric value, or ``None`` if it is not numeric.
+    """
+    cleaned = value.strip().rstrip("%").lstrip("$").replace(",", "")
+    if not cleaned:
+        return None
+    try:
+        return float(cleaned)
+    except ValueError:
+        return None
+
+
 class CrossReferenceEngine:
     """Compares a subject contract against a corporate standard, clause by clause."""
 
@@ -325,7 +343,7 @@ class CrossReferenceEngine:
                     ),
                 )
             async with semaphore:
-                return await self._classify_pair(clause, match)
+                return await self._classify_pair(tenant_id, clause, match)
 
         # Resilient gather: one clause failing (e.g. retries exhausted on a flaky
         # free tier) must not discard the whole audit — log and skip it.
@@ -381,36 +399,37 @@ class CrossReferenceEngine:
         return top_chunk if top_score >= XREF_MIN_RRF_SCORE else None
 
     async def _classify_pair(
-        self, subject: ClauseInventoryItem, standard: RetrievedChunk
+        self, tenant_id: str, subject: ClauseInventoryItem, standard: RetrievedChunk
     ) -> ClauseDeviation:
         """Classify the deviation between an aligned subject/standard clause pair.
 
+        If both sides are tables, a deterministic cell diff is computed first and
+        handed to the LLM so it *explains* the diff rather than hallucinating a
+        table comparison. Mixed table/prose pairs are flagged as a structural
+        difference; prose pairs use the plain comparison.
+
         Args:
+            tenant_id: The owning tenant (for element-metadata lookup).
             subject: The subject clause.
             standard: The aligned standard chunk.
 
         Returns:
             The classified :class:`ClauseDeviation` (provenance reconciled).
         """
-        prompt = (
-            "Compare a SUBJECT contract clause against the corresponding "
-            "CORPORATE STANDARD clause and classify the deviation.\n\n"
-            "deviation_type must be exactly one of:\n"
-            "- weakened: subject reduces an obligation / liability cap / "
-            "protection relative to the standard.\n"
-            "- strengthened: subject increases an obligation beyond the standard "
-            "(favourable; flag for negotiation).\n"
-            "- contradictory: subject directly conflicts with the standard.\n"
-            "- unaddressed: the two texts are not actually about the same clause "
-            "(retrieval mismatch).\n"
-            "If the clauses are materially equivalent, use 'strengthened' with "
-            "severity 1.\n"
-            "severity is 1 (trivial) to 10 (critical). 'explanation' must cite "
-            "the specific language difference.\n"
-            f"clause_type: {subject.clause_type}\n"
-            f"subject_chunk_id: {subject.chunk_id}\n\n"
-            f"SUBJECT CLAUSE:\n{subject.text}\n\n"
-            f"STANDARD CLAUSE:\n{standard.text}"
+        subject_meta = self._store.get_element_metadata(tenant_id, subject.chunk_id)
+        standard_meta = self._store.get_element_metadata(
+            tenant_id, standard.chunk_id, kind="standards"
+        )
+        subject_is_table = subject_meta.get("element_type") == "table"
+        standard_is_table = standard_meta.get("element_type") == "table"
+
+        prompt = self._pair_prompt(
+            subject,
+            standard,
+            subject_is_table=subject_is_table,
+            standard_is_table=standard_is_table,
+            subject_meta=subject_meta,
+            standard_meta=standard_meta,
         )
         deviation = await self._astructured(ClauseDeviation, prompt)
         # Authoritative provenance from our own data, not the model.
@@ -422,6 +441,135 @@ class CrossReferenceEngine:
         deviation.standard_chunk_id = standard.chunk_id
         deviation.standard_page = standard.page_number
         return deviation
+
+    _DEVIATION_RULES = (
+        "deviation_type must be exactly one of:\n"
+        "- weakened: subject reduces an obligation / liability cap / protection "
+        "relative to the standard.\n"
+        "- strengthened: subject increases an obligation beyond the standard "
+        "(favourable; flag for negotiation).\n"
+        "- contradictory: subject directly conflicts with the standard.\n"
+        "- unaddressed: the two texts are not actually about the same clause "
+        "(retrieval mismatch).\n"
+        "If the clauses are materially equivalent, use 'strengthened' with "
+        "severity 1.\n"
+        "severity is 1 (trivial) to 10 (critical). 'explanation' must cite the "
+        "specific difference.\n"
+    )
+
+    def _pair_prompt(
+        self,
+        subject: ClauseInventoryItem,
+        standard: RetrievedChunk,
+        *,
+        subject_is_table: bool,
+        standard_is_table: bool,
+        subject_meta: dict[str, object],
+        standard_meta: dict[str, object],
+    ) -> str:
+        """Build the classification prompt for an aligned pair.
+
+        Args:
+            subject: The subject clause.
+            standard: The aligned standard chunk.
+            subject_is_table: Whether the subject element is a table.
+            standard_is_table: Whether the standard element is a table.
+            subject_meta: Subject element metadata (headers / cells).
+            standard_meta: Standard element metadata (headers / cells).
+
+        Returns:
+            A prompt tailored to table / mixed / prose pairs.
+        """
+        header = (
+            "Compare a SUBJECT contract clause against the corresponding "
+            f"CORPORATE STANDARD clause and classify the deviation.\n\n"
+            f"{self._DEVIATION_RULES}"
+            f"clause_type: {subject.clause_type}\n\n"
+        )
+        if subject_is_table and standard_is_table:
+            cell_diff = self._diff_tables(subject_meta, standard_meta)
+            return (
+                header
+                + "Both sources are TABLES. A pre-computed CELL DIFF is provided; "
+                "base your classification and explanation on it and do not invent "
+                "comparisons not present in the diff.\n\n"
+                f"CELL DIFF:\n{cell_diff}\n\n"
+                f"SUBJECT TABLE:\n{subject.text}\n\n"
+                f"STANDARD TABLE:\n{standard.text}"
+            )
+        if subject_is_table != standard_is_table:
+            subj_kind = "a table" if subject_is_table else "prose"
+            std_kind = "a table" if standard_is_table else "prose"
+            return (
+                header
+                + f"NOTE: the subject is {subj_kind} and the standard is "
+                f"{std_kind}. Flag this structural format difference in the "
+                "explanation.\n\n"
+                f"SUBJECT CLAUSE:\n{subject.text}\n\n"
+                f"STANDARD CLAUSE:\n{standard.text}"
+            )
+        return (
+            header
+            + f"SUBJECT CLAUSE:\n{subject.text}\n\n"
+            f"STANDARD CLAUSE:\n{standard.text}"
+        )
+
+    @staticmethod
+    def _diff_tables(
+        subject_meta: dict[str, object], standard_meta: dict[str, object]
+    ) -> str:
+        """Compute a deterministic cell-level diff between two tables.
+
+        Flags numeric cells where the subject exceeds the standard (possible
+        weakening) and columns present in the standard but missing from the
+        subject. Column alignment is by header label (case-insensitive); when
+        headers are absent it falls back to positional comparison.
+
+        Args:
+            subject_meta: Subject table metadata (``column_headers`` / cells).
+            standard_meta: Standard table metadata.
+
+        Returns:
+            A human-readable diff summary for the LLM to explain.
+        """
+        s_headers = cast("list[str]", subject_meta.get("column_headers") or [])
+        t_headers = cast("list[str]", standard_meta.get("column_headers") or [])
+        s_data = cast("list[list[str]]", subject_meta.get("structured_data") or [])
+        t_data = cast("list[list[str]]", standard_meta.get("structured_data") or [])
+        s_lower = [h.lower() for h in s_headers]
+        lines: list[str] = []
+
+        for col in t_headers:
+            if col.lower() not in s_lower:
+                lines.append(
+                    f"Column '{col}' is in the standard but missing from the "
+                    "contract."
+                )
+
+        for t_index, col in enumerate(t_headers):
+            if col.lower() not in s_lower:
+                continue
+            s_index = s_lower.index(col.lower())
+            for row in range(min(len(s_data), len(t_data))):
+                s_cell = s_data[row][s_index] if s_index < len(s_data[row]) else ""
+                t_cell = t_data[row][t_index] if t_index < len(t_data[row]) else ""
+                s_num, t_num = _as_number(s_cell), _as_number(t_cell)
+                if s_num is not None and t_num is not None and s_num > t_num:
+                    lines.append(
+                        f"Column '{col}' row {row + 1}: contract {s_cell} > "
+                        f"standard {t_cell} (possible weakening)."
+                    )
+                elif s_cell != t_cell:
+                    lines.append(
+                        f"Column '{col}' row {row + 1}: contract '{s_cell}' vs "
+                        f"standard '{t_cell}'."
+                    )
+
+        if not s_headers and not t_headers:
+            lines.append(
+                "Neither table has detected headers; compare cells positionally."
+            )
+        return "\n".join(lines) if lines else "No differing cells detected."
 
     # --- Phase 2b: missing standard clauses ----------------------------------
 
