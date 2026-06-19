@@ -249,7 +249,9 @@ class DocumentParser:
         Returns:
             One :class:`TableElement` per detected table (accuracy-filtered).
         """
-        import camelot  # lazy
+        # Import from the defining submodule: camelot's __init__ re-exports
+        # read_pdf without declaring it, which trips mypy's no-implicit-reexport.
+        from camelot.io import read_pdf  # lazy
 
         detected, method = [], ExtractionMethod.CAMELOT_LATTICE
         for flavor, flavor_method, extra in (
@@ -257,7 +259,7 @@ class DocumentParser:
             ("stream", ExtractionMethod.CAMELOT_STREAM, {"edge_tol": 50}),
         ):
             try:
-                tables = camelot.read_pdf(
+                tables = read_pdf(
                     pdf_path, pages=str(page_number), flavor=flavor, **extra
                 )
             except Exception:  # noqa: BLE001 - camelot raises on odd pages
