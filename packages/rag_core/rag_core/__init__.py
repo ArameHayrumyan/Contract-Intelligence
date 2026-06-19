@@ -25,7 +25,7 @@ if TYPE_CHECKING:  # Eager names for type checkers / IDEs only.
     )
     from rag_core.engine import AuditEngine, reciprocal_rank_fusion
     from rag_core.ingestion_queue import IngestionQueue, InProcessIngestionQueue
-    from rag_core.processor import DocumentProcessor, ProcessingResult
+    from rag_core.processor import DocumentParser
     from rag_core.schemas import (
         Chunk,
         ContractAuditSchema,
@@ -52,8 +52,7 @@ _EXPORTS: dict[str, str] = {
     "reciprocal_rank_fusion": "engine",
     "IngestionQueue": "ingestion_queue",
     "InProcessIngestionQueue": "ingestion_queue",
-    "DocumentProcessor": "processor",
-    "ProcessingResult": "processor",
+    "DocumentParser": "processor",
     "Chunk": "schemas",
     "ContractAuditSchema": "schemas",
     "CriticalClause": "schemas",

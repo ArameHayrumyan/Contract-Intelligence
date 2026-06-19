@@ -9,6 +9,7 @@ with "Auditor" in the name (Architectural Constraint #3).
 from __future__ import annotations
 
 from enum import StrEnum
+from typing import Literal
 
 from pydantic import BaseModel, Field
 
@@ -129,15 +130,107 @@ class DocumentRecord(BaseModel):
     audit: ContractAuditSchema | None = None
 
 
+class ExtractionMethod(StrEnum):
+    """Which extractor produced an element (tiered parsing strategy)."""
+
+    PDFPLUMBER_NATIVE = "pdfplumber_native"
+    PYMUPDF_MULTICOLUMN = "pymupdf_multicolumn"
+    CAMELOT_LATTICE = "camelot_lattice"
+    CAMELOT_STREAM = "camelot_stream"
+    OCR_PYTESSERACT = "ocr_pytesseract"
+    OCR_IMG2TABLE = "ocr_img2table"
+
+
+class DocumentElementType(StrEnum):
+    """Structural kind of a parsed document element."""
+
+    TEXT = "text"
+    TABLE = "table"
+    SECTION_HEADER = "section_header"
+
+
+class TableElement(BaseModel):
+    """A parsed table with both human-readable and structured representations.
+
+    Attributes:
+        element_type: Always ``TABLE``.
+        page_number: 1-based source page.
+        chunk_id: Stable id (``{document_id}_table_p{page}_{index}``).
+        extraction_method: Which extractor produced it.
+        markdown_representation: Pipe-delimited markdown, used for RAG chunking.
+        column_headers: Header labels; empty when no header row was detected.
+        structured_data: Raw cells ``[row][col]`` with the header row excluded;
+            used for direct cell-level comparison in cross-referencing.
+        tenant_id: Owning tenant (Constraint #2).
+    """
+
+    element_type: Literal[DocumentElementType.TABLE] = DocumentElementType.TABLE
+    page_number: int
+    chunk_id: str
+    extraction_method: ExtractionMethod
+    markdown_representation: str
+    column_headers: list[str] = Field(default_factory=list)
+    structured_data: list[list[str]] = Field(default_factory=list)
+    tenant_id: str
+
+
+class TextElement(BaseModel):
+    """A parsed run of prose or a section header.
+
+    Attributes:
+        element_type: ``TEXT`` or ``SECTION_HEADER``.
+        page_number: 1-based source page.
+        chunk_id: Stable chunk id.
+        extraction_method: Which extractor produced it.
+        text: The extracted text.
+        tenant_id: Owning tenant (Constraint #2).
+    """
+
+    element_type: Literal[
+        DocumentElementType.TEXT, DocumentElementType.SECTION_HEADER
+    ] = DocumentElementType.TEXT
+    page_number: int
+    chunk_id: str
+    extraction_method: ExtractionMethod
+    text: str
+    tenant_id: str
+
+
+class ParsedDocument(BaseModel):
+    """The full tiered-parser output for one document (processor-internal).
+
+    Attributes:
+        document_id: Owning document.
+        tenant_id: Owning tenant (Constraint #2).
+        total_pages: Page count of the source PDF.
+        elements: Ordered text/table elements across all pages.
+        extraction_summary: Count of elements produced per extraction method.
+    """
+
+    document_id: str
+    tenant_id: str
+    total_pages: int
+    elements: list[TableElement | TextElement] = Field(default_factory=list)
+    extraction_summary: dict[ExtractionMethod, int] = Field(default_factory=dict)
+
+
 class Chunk(BaseModel):
-    """A persisted text chunk carrying provenance metadata.
+    """A persisted chunk carrying provenance and element metadata.
+
+    Text chunks leave the table fields empty; table chunks carry the parsed
+    grid so cross-referencing can compare cells directly. Defaults keep the
+    common text-chunk construction unchanged.
 
     Attributes:
         chunk_id: Stable unique id for the chunk.
         document_id: Owning document.
         tenant_id: Owning tenant (Constraint #2).
         page_number: 1-based source page number.
-        text: Chunk text content.
+        text: Chunk text content (table chunks store their markdown here).
+        element_type: ``text`` / ``table`` / ``section_header``.
+        extraction_method: Which extractor produced the source element.
+        column_headers: Table header labels (empty for text chunks).
+        structured_data: Table cells ``[row][col]`` (empty for text chunks).
     """
 
     chunk_id: str
@@ -145,6 +238,10 @@ class Chunk(BaseModel):
     tenant_id: str
     page_number: int | None
     text: str
+    element_type: DocumentElementType = DocumentElementType.TEXT
+    extraction_method: ExtractionMethod = ExtractionMethod.PDFPLUMBER_NATIVE
+    column_headers: list[str] = Field(default_factory=list)
+    structured_data: list[list[str]] = Field(default_factory=list)
 
 
 class QARequest(BaseModel):

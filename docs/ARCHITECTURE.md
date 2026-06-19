@@ -22,7 +22,7 @@ FastAPI (apps/api)  ── the ONLY consumer of rag_core
 rag_core (packages/rag_core)
   ├─ config      Settings + environment-gated LLMProviderFactory
   ├─ security    size cap · MIME sniff · page cap (pre-parse)
-  ├─ processor   pdfplumber → OCR failover → hierarchy-aware chunking
+  ├─ processor   tiered parsing: layout classify → tables + text → chunking
   ├─ storage     tenant-scoped Chroma collections (contracts + standards) + BM25
   ├─ engine      multi-query expansion · hybrid (vector+BM25) RRF (k=60) · structured output
   ├─ engine_xref cross-reference: clause inventory → align → classify → score
@@ -103,6 +103,38 @@ or the `/audit` endpoint.
   `GET /standards` (grouped list), `POST /documents/{id}/cross-reference`
   (synchronous for the demo; both ids validated against the caller's tenant —
   cross-tenant reference returns 403).
+
+## Document parsing (tiered extraction)
+
+PDFs vary wildly — clean native text, two-column legal layouts, bordered tables,
+and scans. A single extractor handles none of them well, so `processor.py` runs a
+**tiered strategy**, deliberately **not** `unstructured` (whose detectron2 /
+paddleocr models add 3-4 GB RAM and OOM the Droplet). The CPU-only toolchain
+(pymupdf + camelot + img2table) adds well under ~0.5 GB.
+
+**Per-page decision tree** (`DocumentParser.parse`):
+
+1. **Classify layout** with pymupdf text blocks: a page is *multi-column* when
+   two non-overlapping blocks span >70% of the width; *scanned* when there are no
+   text blocks (or mean block text < 10 chars); else *single-column native*.
+2. **Tables** (native pages): camelot **lattice** first (accuracy ≥ 85), falling
+   back to **stream** (`edge_tol=50`). Lattice is tried first because ruled
+   tables — the common case in contracts/SLAs — are detected far more reliably by
+   line intersection than by whitespace heuristics.
+3. **Text** per layout: pdfplumber for single-column (preserves reading order);
+   **pymupdf block ordering** for multi-column (pdfplumber concatenates the two
+   columns horizontally and garbles them); OCR (Otsu + pytesseract) for scans,
+   with **img2table** additionally detecting tables in the page image.
+4. **Header pre-pass** then chunking. Text uses the splitter (1200/250); **tables
+   are never split** — a table is one chunk so its structure survives retrieval
+   (a >1200-char table is logged, not truncated).
+
+**Dual output.** Each table is stored with two representations: a
+`markdown_representation` (the searchable `document` text, so semantic search and
+the audit/QA prompts read human-readable rows) and `structured_data` (the raw
+`[row][col]` grid, persisted in Chroma metadata). Cross-referencing uses the grid
+for a deterministic **cell diff** before the LLM, so the model explains a real
+comparison instead of hallucinating one over markdown.
 
 ## Cross-cutting concerns
 

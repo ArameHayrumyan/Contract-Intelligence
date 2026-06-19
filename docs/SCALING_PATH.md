@@ -42,3 +42,17 @@ These are fixed requirements, not defaults to optimise away:
 - Embeddings (`BAAI/bge-small-en-v1.5`) run locally today. At scale, move them
   behind a dedicated embedding service or the managed store's native embeddings
   to free API memory.
+
+## Document parsing
+
+- **If document types expand beyond PDF** (invoices, emails, HTML exports):
+  replace the tiered `DocumentParser` with `unstructured` deployed as an
+  **isolated sidecar container** — never inline in the API process. Its ML models
+  (detectron2, paddleocr) add 3-4 GB RAM; isolating them prevents OOM on the main
+  API container (which also runs FastAPI, Chroma, and the embedding model). The
+  parser is already behind a single class (`DocumentParser.parse`) returning a
+  `ParsedDocument`, so the swap is one module plus a network hop.
+- **Licensing:** PyMuPDF is **AGPL-3.0**. Fine for an internal/demo deployment;
+  for commercial redistribution either obtain a PyMuPDF commercial license or
+  replace the multi-column block extraction with a permissively-licensed
+  alternative (e.g. `pdfminer.six` layout analysis).
