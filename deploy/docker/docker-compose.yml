@@ -13,9 +13,21 @@ services:
       # Persist the vector index on a named volume (survives container rebuilds).
       CHROMA_PERSIST_DIR: /app/data/chroma
       LOG_DIR: /app/logs
+      # Reliable file-watching across the Windows<->container boundary.
+      WATCHFILES_FORCE_POLLING: "true"
     volumes:
+      # Live source mounts: edit rag_core / api on the host and the server
+      # reloads in-place — no image rebuild. Rebuild only when DEPS change.
+      - ../../packages/rag_core:/app/packages/rag_core
+      - ../../apps/api:/app/apps/api
       - chroma-data:/app/data/chroma
       - api-logs:/app/logs
+    # Re-link rag_core to the mounted source (editable, deps already baked),
+    # then run uvicorn watching both source trees.
+    command: >
+      sh -c "pip install -e /app/packages/rag_core --no-deps -q &&
+             uvicorn main:app --host 0.0.0.0 --port 8000 --reload
+             --reload-dir /app/apps/api --reload-dir /app/packages/rag_core"
     ports:
       - "8000:8000"
     healthcheck:

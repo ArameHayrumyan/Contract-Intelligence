@@ -17,6 +17,7 @@ export default function RootLayout({ children }: { children: ReactNode }) {
         <nav className="nav">
           <span className="brand">⚖️ Contract Intelligence</span>
           <Link href="/upload">Upload</Link>
+          <Link href="/standards">Standards</Link>
           <Link href="/qa">Ask</Link>
         </nav>
         <main className="container">{children}</main>

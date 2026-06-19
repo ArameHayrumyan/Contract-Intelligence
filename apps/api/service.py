@@ -22,6 +22,7 @@ from concurrent.futures import ThreadPoolExecutor
 
 from rag_core.config import LLMProviderFactory, Settings
 from rag_core.engine import AuditEngine
+from rag_core.engine_xref import CrossReferenceEngine
 from rag_core.ingestion_queue import IngestionQueue, IngestJob, InProcessIngestionQueue
 from rag_core.processor import DocumentProcessor
 from rag_core.schemas import (
@@ -30,6 +31,7 @@ from rag_core.schemas import (
     DocumentStatus,
     QAResponse,
 )
+from rag_core.schemas_xref import CrossReferenceAuditSchema, StandardRecord
 from rag_core.storage import TenantVectorStore
 
 logger = logging.getLogger("rag_core.api.service")
@@ -37,6 +39,14 @@ logger = logging.getLogger("rag_core.api.service")
 
 class DocumentNotFoundError(KeyError):
     """Raised when a document id is unknown for the requesting tenant."""
+
+
+class StandardNotFoundError(KeyError):
+    """Raised when a standard id is unknown for (or not owned by) the tenant.
+
+    The cross-reference router maps this to HTTP 403: a tenant must not be able
+    to reference another tenant's standard even with a valid id.
+    """
 
 
 class ContractService:
@@ -52,6 +62,7 @@ class ContractService:
         settings: Settings,
         store: TenantVectorStore | None = None,
         engine: AuditEngine | None = None,
+        xref_engine: CrossReferenceEngine | None = None,
         queue: IngestionQueue | None = None,
         synchronous: bool = False,
     ) -> None:
@@ -60,7 +71,8 @@ class ContractService:
         Args:
             settings: Application settings.
             store: Optional vector store (tests inject an ephemeral one).
-            engine: Optional pre-built engine (tests inject a fake LLM).
+            engine: Optional pre-built audit engine (tests inject a fake LLM).
+            xref_engine: Optional pre-built cross-reference engine (tests inject).
             queue: Optional ingestion queue override.
             synchronous: If ``True``, ingestion runs inline (used in tests for
                 deterministic behaviour).
@@ -69,16 +81,34 @@ class ContractService:
         self._processor = DocumentProcessor(settings)
         self._store = store or TenantVectorStore(settings)
 
+        # Build the LLM once only if a real engine is actually needed. The
+        # assert narrows the optional for the type checker (it is always set
+        # whenever an engine has to be constructed).
+        built_llm = None
+        if engine is None or xref_engine is None:
+            built_llm = LLMProviderFactory(settings).build()
         if engine is not None:
             self._engine = engine
         else:
-            llm = LLMProviderFactory(settings).build()
-            self._engine = AuditEngine(settings=settings, store=self._store, llm=llm)
+            assert built_llm is not None
+            self._engine = AuditEngine(
+                settings=settings, store=self._store, llm=built_llm
+            )
+        if xref_engine is not None:
+            self._xref_engine = xref_engine
+        else:
+            assert built_llm is not None
+            self._xref_engine = CrossReferenceEngine(
+                settings=settings, store=self._store, llm=built_llm
+            )
 
-        # Tenant-scoped registry: (tenant_id, document_id) -> record.
+        # Tenant-scoped registries: (tenant_id, id) -> record.
         self._registry: dict[tuple[str, str], DocumentRecord] = {}
+        self._standards: dict[tuple[str, str], StandardRecord] = {}
         # Raw bytes awaiting processing, keyed identically. Cleared after ingest.
         self._pending: dict[tuple[str, str], bytes] = {}
+        # Standard pending payloads: key -> (bytes, name, version).
+        self._standards_pending: dict[tuple[str, str], tuple[bytes, str, str]] = {}
         self._lock = threading.Lock()
 
         self._executor = ThreadPoolExecutor(
@@ -87,6 +117,11 @@ class ContractService:
         runner = self._make_runner(synchronous)
         self._queue: IngestionQueue = queue or InProcessIngestionQueue(
             job=self._ingest_job, runner=runner
+        )
+        # Separate queue instance for standards so status tracking does not
+        # collide with the contracts queue (same id space, different worklists).
+        self._standards_queue: IngestionQueue = InProcessIngestionQueue(
+            job=self._ingest_standard_job, runner=runner
         )
 
     def _make_runner(self, synchronous: bool):  # type: ignore[no-untyped-def]
@@ -275,6 +310,169 @@ class ContractService:
         """
         return self._engine.answer_question(
             tenant_id=tenant_id, question=question, document_ids=document_ids
+        )
+
+    # --- Standards (cross-reference workflow) --------------------------------
+
+    def register_standard_upload(
+        self,
+        *,
+        tenant_id: str,
+        data: bytes,
+        standard_name: str,
+        standard_version: str,
+    ) -> StandardRecord:
+        """Register a validated standard upload and enqueue its ingestion.
+
+        Standards are append-only and versioned: this always creates a new
+        ``standard_document_id`` and never overwrites a prior version.
+
+        Args:
+            tenant_id: The owning tenant.
+            data: Validated raw PDF bytes.
+            standard_name: Human-readable standard name (grouping key).
+            standard_version: Version label.
+
+        Returns:
+            The created :class:`StandardRecord` (status ``pending``).
+        """
+        standard_document_id = uuid.uuid4().hex
+        key = (tenant_id, standard_document_id)
+        record = StandardRecord(
+            standard_document_id=standard_document_id,
+            standard_name=standard_name,
+            standard_version=standard_version,
+            tenant_id=tenant_id,
+            status=DocumentStatus.PENDING.value,
+        )
+        with self._lock:
+            self._standards[key] = record
+            self._standards_pending[key] = (data, standard_name, standard_version)
+        self._standards_queue.enqueue(standard_document_id, tenant_id)
+        logger.info(
+            "Registered standard tenant=%s standard=%s name=%s version=%s",
+            tenant_id,
+            standard_document_id,
+            standard_name,
+            standard_version,
+        )
+        return record
+
+    def _ingest_standard_job(self, standard_document_id: str, tenant_id: str) -> None:
+        """Process a pending standard upload into the standards collection.
+
+        Args:
+            standard_document_id: The standard to ingest.
+            tenant_id: The owning tenant.
+
+        Raises:
+            StandardNotFoundError: If no pending payload exists.
+        """
+        key = (tenant_id, standard_document_id)
+        with self._lock:
+            payload = self._standards_pending.get(key)
+            record = self._standards.get(key)
+        if payload is None or record is None:
+            raise StandardNotFoundError(f"No pending standard for {key}")
+        data, name, version = payload
+
+        with self._lock:
+            record.status = DocumentStatus.PROCESSING.value
+        try:
+            result = self._processor.process(
+                data=data, document_id=standard_document_id, tenant_id=tenant_id
+            )
+            self._store.add_standard_chunks(
+                tenant_id,
+                result.chunks,
+                standard_version=version,
+                standard_name=name,
+            )
+        except Exception as exc:  # noqa: BLE001 - record failure on the standard
+            with self._lock:
+                record.status = DocumentStatus.FAILED.value
+                record.error = str(exc)
+            raise
+        finally:
+            with self._lock:
+                self._standards_pending.pop(key, None)
+
+        with self._lock:
+            record.chunk_count = len(result.chunks)
+            record.status = DocumentStatus.READY.value
+            record.error = None
+        logger.info(
+            "Standard ingested tenant=%s standard=%s chunks=%d",
+            tenant_id,
+            standard_document_id,
+            len(result.chunks),
+        )
+
+    def list_standards(self, *, tenant_id: str) -> list[StandardRecord]:
+        """Return all of the tenant's standard documents (all versions).
+
+        Args:
+            tenant_id: The owning tenant.
+
+        Returns:
+            Standard records, sorted by name then version.
+        """
+        with self._lock:
+            records = [r for (t, _), r in self._standards.items() if t == tenant_id]
+        return sorted(records, key=lambda r: (r.standard_name, r.standard_version))
+
+    def get_standard(
+        self, *, tenant_id: str, standard_document_id: str
+    ) -> StandardRecord:
+        """Return a tenant's standard record.
+
+        Args:
+            tenant_id: The owning tenant.
+            standard_document_id: The standard id.
+
+        Returns:
+            The :class:`StandardRecord`.
+
+        Raises:
+            StandardNotFoundError: If unknown for (or not owned by) the tenant.
+        """
+        with self._lock:
+            record = self._standards.get((tenant_id, standard_document_id))
+        if record is None:
+            raise StandardNotFoundError(standard_document_id)
+        return record
+
+    async def cross_reference(
+        self, *, tenant_id: str, document_id: str, standard_document_id: str
+    ) -> CrossReferenceAuditSchema:
+        """Cross-reference a contract against a standard, both tenant-scoped.
+
+        Args:
+            tenant_id: The caller's tenant.
+            document_id: The subject contract.
+            standard_document_id: The standard to compare against.
+
+        Returns:
+            The :class:`CrossReferenceAuditSchema`.
+
+        Raises:
+            DocumentNotFoundError: If the subject document is unknown/not ready.
+            StandardNotFoundError: If the standard is unknown for the tenant.
+            ValueError: If either document is not yet ``READY``.
+        """
+        subject = self.get_document(tenant_id=tenant_id, document_id=document_id)
+        standard = self.get_standard(
+            tenant_id=tenant_id, standard_document_id=standard_document_id
+        )
+        if subject.status is not DocumentStatus.READY:
+            raise ValueError(f"Document {document_id} is not ready for cross-reference.")
+        if standard.status != DocumentStatus.READY.value:
+            raise ValueError(f"Standard {standard_document_id} is not ready.")
+
+        return await self._xref_engine.run(
+            subject_document_id=document_id,
+            standard_document_id=standard_document_id,
+            tenant_id=tenant_id,
         )
 
     def shutdown(self) -> None:

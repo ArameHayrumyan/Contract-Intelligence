@@ -51,6 +51,58 @@ export interface QAResponse {
   citations: QACitation[];
 }
 
+// --- Cross-reference (contract vs. corporate standard) ---------------------
+
+export type DeviationType =
+  | "missing"
+  | "weakened"
+  | "strengthened"
+  | "contradictory"
+  | "unaddressed";
+
+export interface StandardVersion {
+  standard_document_id: string;
+  standard_version: string;
+  status: string;
+  chunk_count: number | null;
+  error: string | null;
+}
+
+export interface StandardGroup {
+  standard_name: string;
+  versions: StandardVersion[];
+}
+
+export interface StandardUploadResponse {
+  standard_document_id: string;
+  standard_name: string;
+  standard_version: string;
+  status: string;
+}
+
+export interface ClauseDeviation {
+  clause_type: string;
+  subject_text: string;
+  subject_chunk_id: string;
+  subject_page: number | null;
+  standard_text: string | null;
+  standard_chunk_id: string | null;
+  standard_page: number | null;
+  deviation_type: DeviationType;
+  severity: number;
+  explanation: string;
+}
+
+export interface CrossReferenceAudit {
+  subject_document_id: string;
+  standard_document_id: string;
+  standard_version: string;
+  deviations: ClauseDeviation[];
+  overall_risk_score: number;
+  executive_summary: string;
+  tenant_id: string;
+}
+
 export interface QARequest {
   question: string;
   document_ids?: string[] | null;

@@ -1,5 +1,6 @@
 "use client";
 
+import Link from "next/link";
 import { useParams } from "next/navigation";
 import { useEffect, useState } from "react";
 
@@ -58,6 +59,13 @@ export default function AuditPage() {
       >
         <h1 style={{ margin: 0 }}>{audit.vendor_name}</h1>
         <RiskBadge score={audit.risk_score} />
+        <Link
+          className="btn"
+          href={`/crossref/${documentId}`}
+          style={{ marginLeft: "auto" }}
+        >
+          Cross-reference →
+        </Link>
       </div>
 
       <div className="panel">
