@@ -34,6 +34,13 @@ dependencies = [
     "langchain-text-splitters>=0.2",
     "chromadb>=0.5",
     "sentence-transformers>=2.7",
+    # Audit persistence (SQLAlchemy Core + async SQLite). PostgreSQL at scale is
+    # a driver/URL swap — see docs/SCALING_PATH.md.
+    "sqlalchemy[asyncio]>=2.0",
+    "aiosqlite>=0.20",
+    # Enterprise PDF reporting (pure Python, no system deps; WeasyPrint would
+    # need Cairo/Pango). Also used by the parser test fixtures.
+    "reportlab>=4.0",
     # Lexical (keyword) retrieval for hybrid search — pure Python, depends only
     # on numpy (already required), so it adds no system/image weight.
     "rank-bm25>=0.2.2",
@@ -53,7 +60,6 @@ dev = [
     "pytest-asyncio>=0.23",
     "httpx>=0.27",
     "types-Pillow",
-    "reportlab>=4.0",  # programmatic PDF fixtures for parser tests
 ]
 
 [tool.setuptools.packages.find]
