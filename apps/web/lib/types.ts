@@ -34,9 +34,85 @@ export interface ContractAudit {
   auto_renewal: boolean;
   notice_period_days: number;
   liability_cap_description: string;
+  contract_end_date: string | null;
   risk_score: number;
   risk_rationale: string;
   critical_clauses: CriticalClause[];
+}
+
+// --- Dashboard / persistence -----------------------------------------------
+
+export type WorkflowStatus =
+  | "processing"
+  | "audited"
+  | "reviewed"
+  | "approved"
+  | "flagged";
+
+export interface DashboardSummary {
+  total_contracts: number;
+  avg_risk_score: number;
+  risk_distribution: { low: number; medium: number; high: number };
+  contracts_with_autorenewal: number;
+  contracts_expiring_soon: number;
+  recent_high_risk: {
+    document_id: string;
+    vendor_name: string;
+    risk_score: number;
+    created_at: string;
+  }[];
+}
+
+export interface ContractRow {
+  document_id: string;
+  vendor_name: string;
+  contract_type: string;
+  risk_score: number;
+  auto_renewal: boolean;
+  notice_period_days: number | null;
+  contract_end_date: string | null;
+  status: WorkflowStatus;
+  status_note: string | null;
+  risk_rationale: string;
+  critical_clauses: CriticalClause[];
+  has_crossref: boolean;
+  created_at: string;
+}
+
+export interface ContractPage {
+  items: ContractRow[];
+  total: number;
+  page: number;
+  page_size: number;
+  total_pages: number;
+}
+
+export interface ContractFilters {
+  risk_score_min?: number;
+  risk_score_max?: number;
+  contract_type?: string;
+  auto_renewal?: boolean;
+  status?: WorkflowStatus;
+  sort_by?: "risk_score" | "created_at" | "vendor_name" | "contract_end_date";
+  sort_order?: "asc" | "desc";
+  page?: number;
+  page_size?: number;
+}
+
+// --- Monitoring ------------------------------------------------------------
+
+export interface RenewalWindow {
+  label: string;
+  threshold_days: number;
+  count: number;
+  contracts: ContractRow[];
+}
+
+export interface RenewalReport {
+  windows: RenewalWindow[];
+  total_at_risk: number;
+  configured_thresholds: number[];
+  unknown_date?: { label: string; count: number; contracts: ContractRow[] };
 }
 
 export interface QACitation {
