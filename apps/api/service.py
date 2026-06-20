@@ -23,6 +23,7 @@ import uuid
 from concurrent.futures import ThreadPoolExecutor
 
 from rag_core.config import LLMProviderFactory, Settings
+from rag_core.database import upsert_crossref_result
 from rag_core.engine import AuditEngine
 from rag_core.engine_xref import CrossReferenceEngine
 from rag_core.ingestion_queue import IngestionQueue, IngestJob, InProcessIngestionQueue
@@ -542,11 +543,20 @@ class ContractService:
         if standard.status != DocumentStatus.READY.value:
             raise ValueError(f"Standard {standard_document_id} is not ready.")
 
-        return await self._xref_engine.run(
+        result = await self._xref_engine.run(
             subject_document_id=document_id,
             standard_document_id=standard_document_id,
             tenant_id=tenant_id,
         )
+        # Persist for the dashboard/export (sets has_crossref on the audit row).
+        # Best-effort: a storage failure must not fail the cross-reference.
+        try:
+            await upsert_crossref_result(result, tenant_id=tenant_id)
+        except Exception:  # noqa: BLE001 - persistence is best-effort
+            logger.exception(
+                "Failed to persist cross-reference for document=%s", document_id
+            )
+        return result
 
     def shutdown(self) -> None:
         """Cleanly stop the ingestion executor (called on app shutdown)."""
