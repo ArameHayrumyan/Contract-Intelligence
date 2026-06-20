@@ -223,3 +223,13 @@ async def client(app):  # type: ignore[no-untyped-def]
         headers={"X-API-Key": "demo-key-tenant-acme"},
     ) as ac:
         yield ac
+
+
+@pytest.fixture()
+async def audit_db(tmp_path):  # type: ignore[no-untyped-def]
+    """Initialise a fresh temp audit database (the lifespan does not run in tests)."""
+    from rag_core.database import dispose_db, init_db
+
+    await init_db(tmp_path / "audit_test.db")
+    yield
+    await dispose_db()

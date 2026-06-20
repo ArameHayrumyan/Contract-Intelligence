@@ -78,6 +78,7 @@ class Settings(BaseSettings):
             insufficient and OCR failover is triggered.
         chroma_persist_dir: On-disk persistence path for ChromaDB.
         embedding_model: Local sentence-transformers model id (no external call).
+        sqlite_db_path: On-disk path for the audit-results SQLite database.
         access_code: Shared application access code (used by the web gate).
         openai_api_key / anthropic_api_key / groq_api_key / google_api_key:
             Provider credentials, only the active one is required.
@@ -107,6 +108,9 @@ class Settings(BaseSettings):
     # --- Storage -------------------------------------------------------------
     chroma_persist_dir: Path = Path("data/chroma")
     embedding_model: str = "BAAI/bge-small-en-v1.5"
+    # Relative by default so local dev works on any OS; Docker overrides this to
+    # an absolute path under a mounted volume (see docker-compose.yml).
+    sqlite_db_path: Path = Path("data/audits/audit_store.db")
 
     # --- Generation tuning ---------------------------------------------------
     llm_temperature: float = Field(default=0.0, ge=0.0, le=2.0)

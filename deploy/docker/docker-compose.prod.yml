@@ -12,9 +12,11 @@ services:
     environment:
       ENVIRONMENT: production
       CHROMA_PERSIST_DIR: /app/data/chroma
+      SQLITE_DB_PATH: /app/data/audits/audit_store.db
       LOG_DIR: /app/logs
     volumes:
       - chroma-data:/app/data/chroma
+      - audit-data:/app/data/audits
       - api-logs:/app/logs
     expose:
       - "8000"
@@ -52,6 +54,7 @@ services:
 
 volumes:
   chroma-data:
+  audit-data:
   api-logs:
   caddy-data:
   caddy-config:

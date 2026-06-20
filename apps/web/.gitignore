@@ -1,0 +1,9 @@
+# Next.js
+/.next/
+/out/
+
+# Dependencies
+/node_modules
+
+# TypeScript incremental build cache
+*.tsbuildinfo

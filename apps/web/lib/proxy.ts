@@ -68,3 +68,46 @@ export async function proxy(options: ProxyOptions): Promise<NextResponse> {
     },
   });
 }
+
+/**
+ * Binary variant of {@link proxy} for downloads (PDFs).
+ *
+ * The text-based `proxy` would corrupt binary bodies, so this forwards the raw
+ * bytes and preserves `Content-Type` / `Content-Disposition`.
+ *
+ * @returns The backend response as binary, or a 401/502 JSON error.
+ */
+export async function proxyBinary(options: ProxyOptions): Promise<NextResponse> {
+  const cookieStore = cookies();
+  if (!isAccessGranted(cookieStore.get(ACCESS_COOKIE)?.value)) {
+    return NextResponse.json({ detail: "Access code required." }, { status: 401 });
+  }
+
+  let res: Response;
+  try {
+    res = await fetch(`${backendBaseUrl()}${options.path}`, {
+      method: options.method,
+      headers: { "X-API-Key": backendApiKey(), ...(options.headers ?? {}) },
+      body: options.body,
+      cache: "no-store",
+    });
+  } catch {
+    return NextResponse.json({ detail: "Backend unreachable." }, { status: 502 });
+  }
+
+  if (!res.ok) {
+    // Surface the JSON error body (e.g. 404) without binary handling.
+    return new NextResponse(await res.text(), {
+      status: res.status,
+      headers: { "Content-Type": res.headers.get("Content-Type") ?? "application/json" },
+    });
+  }
+
+  const buffer = await res.arrayBuffer();
+  const headers: Record<string, string> = {
+    "Content-Type": res.headers.get("Content-Type") ?? "application/pdf",
+  };
+  const disposition = res.headers.get("Content-Disposition");
+  if (disposition) headers["Content-Disposition"] = disposition;
+  return new NextResponse(buffer, { status: res.status, headers });
+}

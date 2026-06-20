@@ -7,6 +7,7 @@ import logging
 from fastapi import APIRouter, HTTPException, status
 
 from dependencies import TenantIdDep
+from rag_core.database import upsert_audit_result
 from rag_core.schemas import ContractAuditSchema
 from runtime import ServiceDep
 from service import DocumentNotFoundError
@@ -39,7 +40,7 @@ async def get_audit(
         HTTPException: 404 if unknown, 409 if not yet ready, 502 on engine error.
     """
     try:
-        return service.get_audit(tenant_id=tenant_id, document_id=document_id)
+        audit = service.get_audit(tenant_id=tenant_id, document_id=document_id)
     except DocumentNotFoundError as exc:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
@@ -56,3 +57,17 @@ async def get_audit(
             status_code=status.HTTP_502_BAD_GATEWAY,
             detail="Audit generation failed; see server logs.",
         ) from exc
+
+    # Persist for the dashboard / monitoring / export features. A storage failure
+    # must never fail the audit response, so it is logged, not raised.
+    try:
+        await upsert_audit_result(
+            result=audit,
+            document_id=document_id,
+            tenant_id=tenant_id,
+            contract_end_date=audit.contract_end_date,
+        )
+    except Exception:  # noqa: BLE001 - persistence is best-effort here
+        logger.exception("Failed to persist audit for document=%s", document_id)
+
+    return audit

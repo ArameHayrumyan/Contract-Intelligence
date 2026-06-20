@@ -26,7 +26,17 @@ from rag_core.config import (
     configure_logging as _configure_logging,
     get_settings,
 )
-from routers import audit, crossref, documents, qa, standards
+from rag_core.database import dispose_db, init_db
+from routers import (
+    audit,
+    crossref,
+    dashboard,
+    documents,
+    exports,
+    monitoring,
+    qa,
+    standards,
+)
 from runtime import limiter
 from service import ContractService
 
@@ -61,10 +71,14 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         logger.exception("Refusing to start: invalid configuration")
         raise
     app.state.service = service
+    # Initialise the audit database eagerly (not lazily) so the first request
+    # never races table creation.
+    await init_db(settings.sqlite_db_path)
     try:
         yield
     finally:
         service.shutdown()
+        await dispose_db()
         logger.info("API shutdown complete")
 
 
@@ -105,6 +119,9 @@ def create_app() -> FastAPI:
     app.include_router(qa.router)
     app.include_router(standards.router)
     app.include_router(crossref.router)
+    app.include_router(dashboard.router)
+    app.include_router(exports.router)
+    app.include_router(monitoring.router)
 
     @app.get("/health", tags=["meta"])
     async def health() -> dict[str, str]:

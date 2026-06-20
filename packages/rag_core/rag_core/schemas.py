@@ -8,6 +8,7 @@ with "Auditor" in the name (Architectural Constraint #3).
 
 from __future__ import annotations
 
+from datetime import date
 from enum import StrEnum
 from typing import Literal
 
@@ -70,6 +71,7 @@ class ContractAuditSchema(BaseModel):
         auto_renewal: Whether the contract auto-renews.
         notice_period_days: Termination notice period in days (>= 0).
         liability_cap_description: Free-text description of the liability cap.
+        contract_end_date: Expiry / auto-renewal date if stated, else ``None``.
         risk_score: Overall risk on a 1 (low) to 10 (high) scale.
         risk_rationale: Justification for ``risk_score``.
         critical_clauses: Risk-bearing clauses, each with provenance.
@@ -83,6 +85,13 @@ class ContractAuditSchema(BaseModel):
     )
     liability_cap_description: str = Field(
         ..., description="Description of the liability cap, or 'None found'."
+    )
+    contract_end_date: date | None = Field(
+        default=None,
+        description=(
+            "Contract expiry or auto-renewal date as written in the document. "
+            "Return null if not explicitly stated."
+        ),
     )
     risk_score: int = Field(..., ge=1, le=10, description="Overall risk, 1-10.")
     risk_rationale: str = Field(..., description="Why this risk score was assigned.")
