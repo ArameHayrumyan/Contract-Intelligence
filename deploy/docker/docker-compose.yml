@@ -12,6 +12,8 @@ services:
     environment:
       # Persist the vector index on a named volume (survives container rebuilds).
       CHROMA_PERSIST_DIR: /app/data/chroma
+      # Audit-results SQLite DB, on its own named volume.
+      SQLITE_DB_PATH: /app/data/audits/audit_store.db
       LOG_DIR: /app/logs
       # Reliable file-watching across the Windows<->container boundary.
       WATCHFILES_FORCE_POLLING: "true"
@@ -21,6 +23,7 @@ services:
       - ../../packages/rag_core:/app/packages/rag_core
       - ../../apps/api:/app/apps/api
       - chroma-data:/app/data/chroma
+      - audit-data:/app/data/audits
       - api-logs:/app/logs
     # Re-link rag_core to the mounted source (editable, deps already baked),
     # then run uvicorn watching both source trees.
@@ -57,4 +60,5 @@ services:
 
 volumes:
   chroma-data:
+  audit-data:
   api-logs:

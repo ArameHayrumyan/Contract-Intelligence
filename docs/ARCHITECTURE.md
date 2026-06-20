@@ -27,6 +27,8 @@ rag_core (packages/rag_core)
   ├─ engine      multi-query expansion · hybrid (vector+BM25) RRF (k=60) · structured output
   ├─ engine_xref cross-reference: clause inventory → align → classify → score
   ├─ ingestion_queue   IngestionQueue protocol + in-process impl
+  ├─ database    async SQLite (SQLAlchemy Core) audit/crossref/settings store
+  ├─ report_generator  reportlab PDF reports (single-doc + portfolio)
   ├─ schemas     ContractAuditSchema with per-clause provenance
   └─ schemas_xref  CrossReferenceAuditSchema + ClauseDeviation
 ```
@@ -135,6 +137,31 @@ the audit/QA prompts read human-readable rows) and `structured_data` (the raw
 `[row][col]` grid, persisted in Chroma metadata). Cross-referencing uses the grid
 for a deterministic **cell diff** before the LLM, so the model explains a real
 comparison instead of hallucinating one over markdown.
+
+## Audit persistence (dashboard / monitoring / export)
+
+The audit endpoint used to re-run the LLM pipeline on every call — no history, no
+data for a dashboard, nothing stable to export. `database.py` adds a durable
+record so the three portfolio features read persisted data, never the engine.
+
+- **Store** — `rag_core/database.py`, **SQLAlchemy Core** (explicit `Table`
+  definitions, not the ORM) over **async SQLite** (`aiosqlite`). Tables:
+  `audit_results`, `crossref_results`, `tenant_settings`. Every function is
+  tenant-scoped — `tenant_id` is a required argument and always in the WHERE
+  clause. Initialised eagerly in the API lifespan (not lazily on first request).
+- **Write path** — `GET /documents/{id}/audit` persists via
+  `upsert_audit_result` *after* generation; a storage failure is logged, never
+  fails the audit response. A cross-reference run persists via
+  `upsert_crossref_result` and flips `has_crossref` on the audit row. Re-audits
+  preserve the human workflow status.
+- **Read path** — the dashboard, monitoring, and export routers query
+  `audit_results` directly. ChromaDB is for retrieval, never reporting.
+- **Reports** — `report_generator.py` builds branded PDFs with **reportlab**
+  Platypus (pure Python; WeasyPrint would need Cairo/Pango ~80 MB). Single-doc
+  (cover → summary → clauses → optional cross-reference) and portfolio (cover →
+  overview + bar chart → renewal windows → inventory). Exports stream persisted
+  data — they never re-run the engine. The web proxy forwards PDF bytes through a
+  dedicated binary path (`proxyBinary`) so they are not text-corrupted.
 
 ## Cross-cutting concerns
 
