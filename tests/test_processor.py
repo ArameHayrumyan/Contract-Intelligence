@@ -64,6 +64,10 @@ requires_ghostscript = pytest.mark.skipif(
     and shutil.which("gswin32c") is None,
     reason="ghostscript binary not installed (camelot lattice)",
 )
+requires_tesseract = pytest.mark.skipif(
+    shutil.which("tesseract") is None,
+    reason="tesseract binary not installed (OCR path)",
+)
 
 
 def _two_column_pdf(path: Path) -> None:
@@ -183,6 +187,7 @@ def test_camelot_lattice_table(tmp_path: Path) -> None:
 
 
 @requires_parsers
+@requires_tesseract
 def test_scanned_table_img2table(tmp_path: Path) -> None:
     """The OCR table branch (img2table) extracts a table from a page image.
 
@@ -207,6 +212,7 @@ def test_scanned_table_img2table(tmp_path: Path) -> None:
 
 
 @requires_parsers
+@requires_tesseract
 def test_extraction_summary(tmp_path: Path) -> None:
     """A native page + a scanned page report distinct extraction methods."""
     import fitz
