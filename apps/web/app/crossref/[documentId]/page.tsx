@@ -50,16 +50,17 @@ export default function CrossReferencePage() {
   );
 
   return (
-    <div>
+    <div className="container">
       <h1>Cross-reference audit</h1>
       <p className="muted">
         Compare this contract against a corporate standard, clause by clause.
       </p>
 
       <div className="panel">
-        <label>
+        <label className="field-label">
           Standard
           <select
+            className="select"
             value={selected}
             onChange={(e) => setSelected(e.target.value)}
             style={{ width: "100%", marginTop: 6 }}
@@ -78,7 +79,7 @@ export default function CrossReferencePage() {
           </p>
         ) : null}
         <button
-          className="btn"
+          className="btn btn--primary btn--md"
           onClick={run}
           disabled={running || !selected}
           style={{ marginTop: 14 }}
