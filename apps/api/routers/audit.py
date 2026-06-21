@@ -6,7 +6,7 @@ import logging
 
 from fastapi import APIRouter, HTTPException, status
 
-from dependencies import TenantIdDep
+from dependencies import ActorDep, TenantIdDep
 from rag_core.database import upsert_audit_result
 from rag_core.schemas import ContractAuditSchema
 from runtime import ServiceDep
@@ -21,6 +21,7 @@ router = APIRouter(prefix="/documents", tags=["audit"])
 async def get_audit(
     document_id: str,
     tenant_id: TenantIdDep,
+    actor: ActorDep,
     service: ServiceDep,
 ) -> ContractAuditSchema:
     """Return the structured audit for a ready document.
@@ -66,6 +67,7 @@ async def get_audit(
             document_id=document_id,
             tenant_id=tenant_id,
             contract_end_date=audit.contract_end_date,
+            actor=actor,
         )
     except Exception:  # noqa: BLE001 - persistence is best-effort here
         logger.exception("Failed to persist audit for document=%s", document_id)

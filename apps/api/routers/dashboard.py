@@ -7,20 +7,32 @@ tenant-scoped via the auth-derived ``tenant_id``.
 
 from __future__ import annotations
 
+import io
 import logging
+import zipfile
 from datetime import date
 from typing import Any
 
 from fastapi import APIRouter, HTTPException, Query, status
+from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 
-from dependencies import TenantIdDep
+from dependencies import ActorDep, TenantIdDep
 from rag_core.database import (
     AuditFilters,
+    bulk_update_status,
+    get_audit_result,
+    insert_activity,
     list_audit_results,
     update_audit_status,
 )
-from rag_core.schemas import RiskBand
+from rag_core.schemas import (
+    ActivityAction,
+    BulkExportRequest,
+    BulkStatusRequest,
+    RiskBand,
+)
+from routers._reporting import build_single_report, slugify
 
 logger = logging.getLogger("rag_core.api.dashboard")
 
@@ -150,7 +162,10 @@ async def list_contracts(
 
 @router.patch("/contracts/{document_id}/status")
 async def patch_status(
-    document_id: str, payload: StatusUpdate, tenant_id: TenantIdDep
+    document_id: str,
+    payload: StatusUpdate,
+    tenant_id: TenantIdDep,
+    actor: ActorDep,
 ) -> dict[str, Any]:
     """Update a contract's workflow status.
 
@@ -167,7 +182,7 @@ async def patch_status(
     """
     try:
         record = await update_audit_status(
-            document_id, tenant_id, payload.status, payload.note
+            document_id, tenant_id, payload.status, payload.note, actor
         )
     except ValueError as exc:
         raise HTTPException(
@@ -179,6 +194,100 @@ async def patch_status(
             detail=f"Contract {document_id} not found.",
         )
     return record
+
+
+async def _assert_all_owned(document_ids: list[str], tenant_id: str) -> None:
+    """Reject the whole batch (403) if any id is not the tenant's.
+
+    Args:
+        document_ids: Ids to validate.
+        tenant_id: The caller's tenant.
+
+    Raises:
+        HTTPException: 403 listing the invalid ids.
+    """
+    invalid = [
+        d for d in document_ids if await get_audit_result(d, tenant_id) is None
+    ]
+    if invalid:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail={"message": "Unknown document ids for this tenant.", "invalid": invalid},
+        )
+
+
+@router.post("/contracts/bulk/status")
+async def bulk_status(
+    payload: BulkStatusRequest, tenant_id: TenantIdDep, actor: ActorDep
+) -> dict[str, Any]:
+    """Bulk-update workflow status; all-or-nothing on ownership.
+
+    Args:
+        payload: Document ids + new status (+ optional note).
+        tenant_id: The caller's tenant.
+        actor: Who performed the action.
+
+    Returns:
+        ``{updated: int, failed: list[str]}``.
+    """
+    await _assert_all_owned(payload.document_ids, tenant_id)
+    return await bulk_update_status(
+        payload.document_ids, tenant_id, payload.status, payload.note, actor
+    )
+
+
+@router.post("/contracts/bulk/export")
+async def bulk_export(
+    payload: BulkExportRequest, tenant_id: TenantIdDep, actor: ActorDep
+) -> StreamingResponse:
+    """Export many contracts as a single in-memory zip of PDFs.
+
+    A per-document failure does not abort the zip — failures are collected into
+    an ``ERRORS.txt`` entry instead.
+
+    Args:
+        payload: Document ids to export (max 20).
+        tenant_id: The caller's tenant.
+        actor: Who performed the export.
+
+    Returns:
+        A streaming ``application/zip`` download.
+    """
+    await _assert_all_owned(payload.document_ids, tenant_id)
+    buffer = io.BytesIO()
+    errors: list[str] = []
+    with zipfile.ZipFile(buffer, "w", zipfile.ZIP_DEFLATED) as archive:
+        for document_id in payload.document_ids:
+            try:
+                built = await build_single_report(tenant_id, document_id)
+                if built is None:
+                    errors.append(f"{document_id}: no audit found")
+                    continue
+                pdf, vendor = built
+                name = f"audit_{slugify(vendor)}_{document_id[:8]}.pdf"
+                archive.writestr(name, pdf)
+            except Exception as exc:  # noqa: BLE001 - one failure must not abort
+                logger.exception("Bulk export failed for %s", document_id)
+                errors.append(f"{document_id}: {exc}")
+        if errors:
+            archive.writestr("ERRORS.txt", "\n".join(errors))
+
+    await insert_activity(
+        tenant_id=tenant_id,
+        actor=actor,
+        action=ActivityAction.BULK_EXPORTED,
+        metadata={"count": len(payload.document_ids), "document_ids": payload.document_ids},
+    )
+    buffer.seek(0)
+    filename = (
+        f"bulk_export_{date.today().isoformat()}_"
+        f"{len(payload.document_ids)}_contracts.zip"
+    )
+    return StreamingResponse(
+        buffer,
+        media_type="application/zip",
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+    )
 
 
 def _days(n: int) -> Any:

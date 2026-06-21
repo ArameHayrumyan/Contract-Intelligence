@@ -27,7 +27,12 @@ from rag_core.config import (
     get_settings,
 )
 from rag_core.database import dispose_db, init_db
+
+# ``annotations`` is aliased because a bare import collides with
+# ``from __future__ import annotations`` (which binds the name as a feature).
 from routers import (
+    activity,
+    annotations as annotations_router,
     audit,
     crossref,
     dashboard,
@@ -122,6 +127,8 @@ def create_app() -> FastAPI:
     app.include_router(dashboard.router)
     app.include_router(exports.router)
     app.include_router(monitoring.router)
+    app.include_router(annotations_router.router, prefix="/documents")
+    app.include_router(activity.router)
 
     @app.get("/health", tags=["meta"])
     async def health() -> dict[str, str]:

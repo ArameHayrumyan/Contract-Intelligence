@@ -7,7 +7,7 @@ import logging
 from fastapi import APIRouter, HTTPException, Request, status
 from pydantic import BaseModel
 
-from dependencies import TenantIdDep
+from dependencies import ActorDep, TenantIdDep
 from rag_core.schemas_xref import CrossReferenceAuditSchema
 from runtime import ServiceDep, limiter
 from service import DocumentNotFoundError, StandardNotFoundError
@@ -37,6 +37,7 @@ async def cross_reference(
     document_id: str,
     payload: CrossReferenceRequest,
     tenant_id: TenantIdDep,
+    actor: ActorDep,
     service: ServiceDep,
 ) -> CrossReferenceAuditSchema:
     """Cross-reference a contract against a corporate standard.
@@ -67,6 +68,7 @@ async def cross_reference(
             tenant_id=tenant_id,
             document_id=document_id,
             standard_document_id=payload.standard_document_id,
+            actor=actor,
         )
     except DocumentNotFoundError as exc:
         raise HTTPException(
