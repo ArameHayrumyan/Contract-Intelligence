@@ -2,6 +2,9 @@
 
 import { useCallback, useEffect, useState } from "react";
 
+import { Button } from "@/components/ui/Button";
+import { Skeleton } from "@/components/ui/Skeleton";
+import { useToast } from "@/components/ui/Toast";
 import {
   createAnnotation,
   deleteAnnotation,
@@ -14,14 +17,6 @@ import type {
   AnnotationType,
 } from "@/lib/types";
 
-interface AnnotationPanelProps {
-  documentId: string;
-  targetType: AnnotationTarget;
-  targetReference?: string;
-  /** Skip the initial fetch if the parent already loaded these. */
-  initialAnnotations?: AnnotationResponse[];
-}
-
 const TYPE_LABELS: Record<AnnotationType, string> = {
   accepted_risk: "Accepted risk",
   escalate_to_legal: "Escalate to legal",
@@ -30,33 +25,38 @@ const TYPE_LABELS: Record<AnnotationType, string> = {
   false_positive: "False positive",
   custom: "Custom",
 };
-
 const TYPES = Object.keys(TYPE_LABELS) as AnnotationType[];
 
-/** Format an ISO timestamp as a coarse "x ago" string. */
 function relativeTime(iso: string): string {
-  const diffMs = Date.now() - new Date(iso).getTime();
-  const mins = Math.round(diffMs / 60000);
+  const mins = Math.round((Date.now() - new Date(iso).getTime()) / 60000);
   if (mins < 1) return "just now";
-  if (mins < 60) return `${mins} minute${mins === 1 ? "" : "s"} ago`;
+  if (mins < 60) return `${mins}m ago`;
   const hours = Math.round(mins / 60);
-  if (hours < 24) return `${hours} hour${hours === 1 ? "" : "s"} ago`;
-  const days = Math.round(hours / 24);
-  return `${days} day${days === 1 ? "" : "s"} ago`;
+  if (hours < 24) return `${hours}h ago`;
+  return `${Math.round(hours / 24)}d ago`;
 }
 
-/** Reusable annotation thread for a document, clause, or deviation target. */
+interface AnnotationPanelProps {
+  documentId: string;
+  targetType: AnnotationTarget;
+  targetReference?: string;
+  initialAnnotations?: AnnotationResponse[];
+  compact?: boolean;
+}
+
+/** Self-contained annotation thread for a document, clause, or deviation. */
 export function AnnotationPanel({
   documentId,
   targetType,
   targetReference,
   initialAnnotations,
+  compact = false,
 }: AnnotationPanelProps) {
-  const [items, setItems] = useState<AnnotationResponse[]>(
-    initialAnnotations ?? [],
-  );
+  const { toast } = useToast();
+  const [items, setItems] = useState<AnnotationResponse[]>(initialAnnotations ?? []);
   const [loading, setLoading] = useState(!initialAnnotations);
-  const [error, setError] = useState(false);
+  const [failed, setFailed] = useState(false);
+  const [showAll, setShowAll] = useState(false);
 
   const [note, setNote] = useState("");
   const [type, setType] = useState<AnnotationType>("custom");
@@ -69,11 +69,11 @@ export function AnnotationPanel({
 
   const load = useCallback(async () => {
     setLoading(true);
-    setError(false);
+    setFailed(false);
     try {
       setItems(await listAnnotations(documentId, targetType, targetReference));
     } catch {
-      setError(true);
+      setFailed(true);
     } finally {
       setLoading(false);
     }
@@ -83,7 +83,7 @@ export function AnnotationPanel({
     if (!initialAnnotations) void load();
   }, [load, initialAnnotations]);
 
-  async function onSubmit() {
+  async function submit() {
     if (note.trim().length < 10) {
       setFormError("Note must be at least 10 characters.");
       return;
@@ -100,38 +100,40 @@ export function AnnotationPanel({
       setItems((prev) => [created, ...prev]);
       setNote("");
       setType("custom");
+      toast("Note saved.", "success");
     } catch {
-      setFormError("Could not save the note. Please try again.");
+      setFormError("Could not save the note.");
     } finally {
       setSubmitting(false);
     }
   }
 
-  async function onSaveEdit(id: string) {
+  async function saveEdit(id: string) {
     if (editNote.trim().length < 10) return;
     const updated = await updateAnnotation(documentId, id, editType, editNote.trim());
     setItems((prev) => prev.map((a) => (a.id === id ? updated : a)));
     setEditingId(null);
   }
 
-  async function onDelete(id: string) {
+  async function remove(id: string) {
     if (!window.confirm("Delete this note?")) return;
     await deleteAnnotation(documentId, id);
     setItems((prev) => prev.filter((a) => a.id !== id));
+    toast("Note deleted.", "info");
   }
 
   if (loading) {
     return (
-      <div className="annotation-panel">
-        <div className="skeleton-line" />
-        <div className="skeleton-line" />
+      <div>
+        <Skeleton height={14} />
+        <Skeleton height={14} width="70%" />
       </div>
     );
   }
-  if (error) {
+  if (failed) {
     return (
-      <div className="annotation-panel">
-        <p className="muted">Could not load annotations.</p>
+      <div className="muted">
+        Could not load annotations.{" "}
         <button className="link-btn" onClick={() => void load()}>
           Retry
         </button>
@@ -139,18 +141,23 @@ export function AnnotationPanel({
     );
   }
 
+  const visible = compact && !showAll ? items.slice(0, 2) : items;
+
   return (
-    <div className="annotation-panel">
+    <div>
       {items.length === 0 ? (
-        <p className="muted">
-          No annotations yet. Be the first to leave a review note.
-        </p>
+        <p className="muted">No annotations yet. Be the first to leave a note.</p>
       ) : (
-        items.map((a) => (
-          <div key={a.id} className={`annotation ann--${a.annotation_type}`}>
+        visible.map((a) => (
+          <div
+            key={a.id}
+            className="annotation"
+            style={{ borderLeftColor: `var(--color-annotation-${a.annotation_type})` }}
+          >
             {editingId === a.id ? (
-              <div>
+              <div className="stack" style={{ gap: "var(--space-2)" }}>
                 <select
+                  className="select"
                   value={editType}
                   onChange={(e) => setEditType(e.target.value as AnnotationType)}
                 >
@@ -161,11 +168,12 @@ export function AnnotationPanel({
                   ))}
                 </select>
                 <textarea
+                  className="textarea"
                   value={editNote}
                   onChange={(e) => setEditNote(e.target.value)}
                 />
-                <div className="annotation-actions">
-                  <button className="link-btn" onClick={() => void onSaveEdit(a.id)}>
+                <div className="row">
+                  <button className="link-btn" onClick={() => void saveEdit(a.id)}>
                     Save
                   </button>
                   <button className="link-btn" onClick={() => setEditingId(null)}>
@@ -175,13 +183,21 @@ export function AnnotationPanel({
               </div>
             ) : (
               <>
-                <span className={`pill ann-pill--${a.annotation_type}`}>
+                <span
+                  className="badge badge--xs"
+                  style={{
+                    color: `var(--color-annotation-${a.annotation_type})`,
+                    borderColor: `var(--color-annotation-${a.annotation_type})`,
+                  }}
+                >
                   {TYPE_LABELS[a.annotation_type]}
                 </span>
-                <p>{a.note}</p>
-                <div className="annotation-meta muted">
-                  Recorded by {a.actor} · {relativeTime(a.created_at)}
-                  <span className="annotation-actions">
+                <p style={{ margin: "var(--space-2) 0 0" }}>{a.note}</p>
+                <div className="annotation__meta">
+                  <span>
+                    {a.actor} · {relativeTime(a.created_at)}
+                  </span>
+                  <span className="row" style={{ gap: "var(--space-2)" }}>
                     <button
                       className="link-btn"
                       title="Edit"
@@ -191,14 +207,14 @@ export function AnnotationPanel({
                         setEditType(a.annotation_type);
                       }}
                     >
-                      ✏️
+                      Edit
                     </button>
                     <button
                       className="link-btn"
                       title="Delete"
-                      onClick={() => void onDelete(a.id)}
+                      onClick={() => void remove(a.id)}
                     >
-                      🗑️
+                      Delete
                     </button>
                   </span>
                 </div>
@@ -208,8 +224,15 @@ export function AnnotationPanel({
         ))
       )}
 
+      {compact && items.length > 2 ? (
+        <button className="link-btn" onClick={() => setShowAll((v) => !v)}>
+          {showAll ? "Show fewer" : `View all ${items.length}`}
+        </button>
+      ) : null}
+
       <div className="annotation-form">
         <select
+          className="select"
           value={type}
           onChange={(e) => setType(e.target.value as AnnotationType)}
         >
@@ -220,18 +243,19 @@ export function AnnotationPanel({
           ))}
         </select>
         <textarea
+          className="textarea"
           value={note}
           onChange={(e) => setNote(e.target.value)}
           placeholder="Add your review note here..."
           maxLength={2000}
         />
-        <div className="annotation-form-foot">
+        <div className="annotation-form__foot">
           {formError ? <span className="error">{formError}</span> : <span />}
-          <span className="muted char-count">{note.length} / 2000</span>
+          <span className="muted">{note.length} / 2000</span>
         </div>
-        <button className="btn" onClick={() => void onSubmit()} disabled={submitting}>
-          {submitting ? "Saving…" : "Save Note"}
-        </button>
+        <Button size="sm" onClick={submit} loading={submitting}>
+          Save Note
+        </Button>
       </div>
     </div>
   );

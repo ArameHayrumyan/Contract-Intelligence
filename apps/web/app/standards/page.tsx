@@ -1,131 +1,145 @@
 "use client";
 
+import Link from "next/link";
 import { useCallback, useEffect, useState } from "react";
 
-import { ApiError, listStandards, uploadStandard } from "@/lib/api-client";
+import { Badge } from "@/components/ui/Badge";
+import { Button } from "@/components/ui/Button";
+import { Card } from "@/components/ui/Card";
+import { DropZone } from "@/components/ui/DropZone";
+import { EmptyState } from "@/components/ui/EmptyState";
+import { PageHeader } from "@/components/ui/PageHeader";
+import { Skeleton } from "@/components/ui/Skeleton";
+import { useToast } from "@/components/ui/Toast";
+import { listStandards, uploadStandard } from "@/lib/api-client";
 import type { StandardGroup } from "@/lib/types";
 
-/** Corporate-standards management: append-only upload + versioned listing. */
 export default function StandardsPage() {
+  const { toast } = useToast();
+  const [groups, setGroups] = useState<StandardGroup[] | null>(null);
   const [name, setName] = useState("");
   const [version, setVersion] = useState("");
   const [file, setFile] = useState<File | null>(null);
+  const [dzKey, setDzKey] = useState(0); // bump to remount/clear the DropZone
   const [busy, setBusy] = useState(false);
-  const [error, setError] = useState<string | null>(null);
-  const [groups, setGroups] = useState<StandardGroup[]>([]);
 
-  const refresh = useCallback(async () => {
-    try {
-      setGroups(await listStandards());
-    } catch {
-      // Non-fatal; the list simply won't update.
-    }
+  const load = useCallback(async () => {
+    setGroups(await listStandards());
   }, []);
-
   useEffect(() => {
-    void refresh();
-  }, [refresh]);
+    void load();
+  }, [load]);
 
-  async function onUpload(event: React.FormEvent) {
-    event.preventDefault();
-    if (!file || !name || !version) return;
+  async function submit() {
+    if (!name || !version || !file) return;
     setBusy(true);
-    setError(null);
     try {
       await uploadStandard(name, version, file);
+      toast("Standard uploaded.", "success");
       setName("");
       setVersion("");
       setFile(null);
-      // Give ingestion a moment, then refresh status.
-      setTimeout(() => void refresh(), 1500);
-      await refresh();
+      setDzKey((k) => k + 1);
+      await load();
     } catch (err) {
-      if (err instanceof ApiError) {
-        const detail = err.detail as { message?: string } | string | undefined;
-        setError(
-          typeof detail === "object" && detail?.message ? detail.message : err.message,
-        );
-      } else {
-        setError("Upload failed.");
-      }
+      toast(err instanceof Error ? err.message : "Upload failed.", "error");
     } finally {
       setBusy(false);
     }
   }
 
+  const count = groups?.reduce((n, g) => n + g.versions.length, 0) ?? 0;
+
   return (
-    <div>
-      <h1>Corporate standards</h1>
-      <p className="muted">
-        Upload your policy documents. Standards are versioned and append-only —
-        new uploads never overwrite previous versions.
-      </p>
+    <div className="container">
+      <PageHeader
+        title="Corporate Standards"
+        subtitle="Policy documents used for cross-reference auditing. Append-only — new uploads create versions."
+      />
 
-      <form className="panel" onSubmit={onUpload}>
-        <label>
-          Standard name
-          <input
-            type="text"
-            value={name}
-            onChange={(e) => setName(e.target.value)}
-            placeholder="e.g. Vendor Contract Policy"
-          />
-        </label>
-        <label style={{ display: "block", marginTop: 10 }}>
-          Version
-          <input
-            type="text"
-            value={version}
-            onChange={(e) => setVersion(e.target.value)}
-            placeholder="e.g. 2025.1"
-          />
-        </label>
-        <input
-          type="file"
-          accept="application/pdf,.pdf"
-          onChange={(e) => setFile(e.target.files?.[0] ?? null)}
-          style={{ marginTop: 10 }}
-        />
-        <button
-          className="btn"
-          type="submit"
-          disabled={busy || !file || !name || !version}
-          style={{ marginTop: 14 }}
-        >
-          {busy ? "Uploading…" : "Upload standard"}
-        </button>
-        {error ? <p className="error">{error}</p> : null}
-      </form>
-
-      <div className="panel">
-        <h3 style={{ marginTop: 0 }}>Uploaded standards</h3>
-        {groups.length === 0 ? (
-          <p className="muted">No standards uploaded yet.</p>
-        ) : (
-          groups.map((g) => (
-            <div key={g.standard_name} style={{ marginBottom: 14 }}>
-              <strong>{g.standard_name}</strong>
-              <table className="dev-table" style={{ marginTop: 6 }}>
-                <thead>
-                  <tr>
-                    <th>Version</th>
-                    <th>Status</th>
-                    <th>Chunks</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {g.versions.map((v) => (
-                    <tr key={v.standard_document_id}>
-                      <td>{v.standard_version}</td>
-                      <td>{v.status}</td>
-                      <td>{v.chunk_count ?? "—"}</td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
+      <div className="two-col">
+        <Card title="Upload a Standard">
+          <div className="stack">
+            <DropZone key={dzKey} onFile={setFile} maxSizeMB={50} height={160} />
+            <div>
+              <label className="field-label">Standard Name</label>
+              <input
+                className="input"
+                value={name}
+                onChange={(e) => setName(e.target.value)}
+                placeholder="Vendor Contract Policy"
+              />
             </div>
-          ))
-        )}
+            <div>
+              <label className="field-label">Version</label>
+              <input
+                className="input"
+                value={version}
+                onChange={(e) => setVersion(e.target.value)}
+                placeholder="2025.1"
+              />
+            </div>
+            <Button
+              fullWidth
+              onClick={submit}
+              loading={busy}
+              disabled={!name || !version || !file}
+            >
+              Upload Standard
+            </Button>
+          </div>
+        </Card>
+
+        <Card
+          title={
+            <span className="row">
+              Uploaded Standards <span className="count-badge">{count}</span>
+            </span>
+          }
+        >
+          {groups === null ? (
+            <Skeleton height={120} />
+          ) : groups.length === 0 ? (
+            <EmptyState
+              title="No standards uploaded yet"
+              description="Upload a standard to enable cross-reference auditing."
+            />
+          ) : (
+            groups.map((g, gi) => (
+              <div
+                key={g.standard_name}
+                style={{
+                  paddingBottom: "var(--space-3)",
+                  marginBottom: "var(--space-3)",
+                  borderBottom:
+                    gi < groups.length - 1
+                      ? "1px solid var(--color-border-subtle)"
+                      : "none",
+                }}
+              >
+                <div style={{ fontWeight: 600, marginBottom: "var(--space-2)" }}>
+                  {g.standard_name}
+                </div>
+                {g.versions.map((v) => (
+                  <div
+                    key={v.standard_document_id}
+                    className="row"
+                    style={{
+                      justifyContent: "space-between",
+                      padding: "var(--space-1) 0",
+                    }}
+                  >
+                    <span className="mono text-muted">{v.standard_version}</span>
+                    <span className="row">
+                      <Badge kind="status" status={v.status} size="xs" />
+                      <Link href="/dashboard">Use in audit →</Link>
+                    </span>
+                  </div>
+                ))}
+              </div>
+            ))
+          )}
+        </Card>
       </div>
     </div>
   );

@@ -53,7 +53,7 @@ function AccessForm() {
         </p>
       ) : null}
       <button
-        className="btn"
+        className="btn btn--primary btn--md"
         type="submit"
         disabled={busy || code.length === 0}
         style={{ marginTop: 14, width: "100%" }}

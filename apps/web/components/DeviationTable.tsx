@@ -3,26 +3,12 @@
 import { Fragment, useState } from "react";
 
 import { AnnotationPanel } from "@/components/AnnotationPanel";
-import type { ClauseDeviation, DeviationType } from "@/lib/types";
-
-/** Human labels for each deviation type. */
-const LABEL: Record<DeviationType, string> = {
-  missing: "Missing",
-  weakened: "Weakened",
-  strengthened: "Strengthened",
-  contradictory: "Contradictory",
-  unaddressed: "Unaddressed",
-};
-
-interface DeviationTableProps {
-  deviations: ClauseDeviation[];
-  /** When set, each deviation row gets an expandable annotation footer. */
-  documentId?: string;
-}
+import { Badge } from "@/components/ui/Badge";
+import type { ClauseDeviation } from "@/lib/types";
 
 function Expandable({ text }: { text: string | null }) {
   const [open, setOpen] = useState(false);
-  if (!text) return <span className="muted">—</span>;
+  if (!text) return <span className="cell-empty">—</span>;
   const truncated = text.length > 120 && !open;
   return (
     <span>
@@ -36,7 +22,13 @@ function Expandable({ text }: { text: string | null }) {
   );
 }
 
-/** Sortable, color-coded table of clause deviations (severity desc default). */
+interface DeviationTableProps {
+  deviations: ClauseDeviation[];
+  /** When set, each row gets an expandable annotation footer. */
+  documentId?: string;
+}
+
+/** Sortable, colour-coded deviation table with inline annotation expansion. */
 export function DeviationTable({ deviations, documentId }: DeviationTableProps) {
   const [desc, setDesc] = useState(true);
   const [openId, setOpenId] = useState<string | null>(null);
@@ -49,17 +41,14 @@ export function DeviationTable({ deviations, documentId }: DeviationTableProps) 
   }
 
   return (
-    <table className="dev-table">
+    <div className="table-wrap">
+    <table className="data-table">
       <thead>
         <tr>
           <th>Clause type</th>
           <th>Deviation</th>
-          <th
-            className="sortable"
-            onClick={() => setDesc((v) => !v)}
-            title="Sort by severity"
-          >
-            Severity {desc ? "▼" : "▲"}
+          <th className="is-sortable" onClick={() => setDesc((v) => !v)}>
+            Severity {desc ? "↓" : "↑"}
           </th>
           <th>Subject text</th>
           <th>Standard text</th>
@@ -71,24 +60,22 @@ export function DeviationTable({ deviations, documentId }: DeviationTableProps) 
           const open = openId !== null && openId === d.deviation_id;
           return (
             <Fragment key={`${d.clause_type}-${i}`}>
-              <tr className={`dev dev--${d.deviation_type}`}>
+              <tr>
                 <td>{d.clause_type}</td>
                 <td>
-                  <span className={`pill pill--${d.deviation_type}`}>
-                    {LABEL[d.deviation_type]}
-                  </span>
+                  <Badge kind="deviation" deviation={d.deviation_type} />
                 </td>
-                <td className="sev">{d.severity}</td>
+                <td>{d.severity}</td>
                 <td>
                   <Expandable text={d.subject_text} />
                   {d.subject_page != null ? (
-                    <div className="prov">subject p.{d.subject_page}</div>
+                    <div className="text-muted">subject p.{d.subject_page}</div>
                   ) : null}
                 </td>
                 <td>
                   <Expandable text={d.standard_text} />
                   {d.standard_page != null ? (
-                    <div className="prov">standard p.{d.standard_page}</div>
+                    <div className="text-muted">standard p.{d.standard_page}</div>
                   ) : null}
                 </td>
                 <td>
@@ -97,9 +84,7 @@ export function DeviationTable({ deviations, documentId }: DeviationTableProps) 
                     <div>
                       <button
                         className="link-btn"
-                        onClick={() =>
-                          setOpenId(open ? null : d.deviation_id)
-                        }
+                        onClick={() => setOpenId(open ? null : d.deviation_id)}
                       >
                         {open ? "Hide annotations" : "Annotations"}
                       </button>
@@ -123,5 +108,6 @@ export function DeviationTable({ deviations, documentId }: DeviationTableProps) 
         })}
       </tbody>
     </table>
+    </div>
   );
 }

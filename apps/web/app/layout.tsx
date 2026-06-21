@@ -1,31 +1,43 @@
 import type { Metadata } from "next";
-import Link from "next/link";
+import { Inter, JetBrains_Mono } from "next/font/google";
 import type { ReactNode } from "react";
 
-import { MonitoringNavLink } from "@/components/MonitoringNavLink";
+import { Navigation } from "@/components/Navigation";
+import { PageFade } from "@/components/PageFade";
+import { RouteProgress } from "@/components/RouteProgress";
+import { ToastProvider } from "@/components/ui/Toast";
 
+import "../styles/design-tokens.css";
 import "./globals.css";
+
+const inter = Inter({
+  subsets: ["latin"],
+  variable: "--font-inter",
+  display: "swap",
+});
+const jetbrains = JetBrains_Mono({
+  subsets: ["latin"],
+  variable: "--font-jetbrains",
+  display: "swap",
+});
 
 export const metadata: Metadata = {
   title: "Secure Contract Intelligence & SLA Auditor",
   description: "Tenant-scoped contract auditing and cross-document QA.",
 };
 
-/** Root layout with the primary navigation shell. */
+/** Root layout: fonts, design tokens, toast provider, nav, and page chrome. */
 export default function RootLayout({ children }: { children: ReactNode }) {
   return (
-    <html lang="en">
+    <html lang="en" className={`${inter.variable} ${jetbrains.variable}`}>
       <body>
-        <nav className="nav">
-          <span className="brand">⚖️ Contract Intelligence</span>
-          <Link href="/dashboard">Dashboard</Link>
-          <Link href="/upload">Upload</Link>
-          <Link href="/standards">Standards</Link>
-          <Link href="/qa">Ask</Link>
-          <MonitoringNavLink />
-          <Link href="/activity">🕐 Activity</Link>
-        </nav>
-        <main className="container">{children}</main>
+        <ToastProvider>
+          <RouteProgress />
+          <Navigation />
+          <main>
+            <PageFade>{children}</PageFade>
+          </main>
+        </ToastProvider>
       </body>
     </html>
   );
