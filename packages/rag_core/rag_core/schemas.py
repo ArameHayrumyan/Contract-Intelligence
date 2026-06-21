@@ -8,11 +8,11 @@ with "Auditor" in the name (Architectural Constraint #3).
 
 from __future__ import annotations
 
-from datetime import date
+from datetime import date, datetime
 from enum import StrEnum
 from typing import Literal
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator, model_validator
 
 
 class RiskBand(StrEnum):
@@ -291,3 +291,120 @@ class QAResponse(BaseModel):
 
     answer: str
     citations: list[QACitation] = Field(default_factory=list)
+
+
+# --- Human annotations & compliance activity log (Tier 2) -------------------
+
+
+class AnnotationType(StrEnum):
+    """Reviewer's classification of a human annotation."""
+
+    ACCEPTED_RISK = "accepted_risk"
+    ESCALATE_TO_LEGAL = "escalate_to_legal"
+    DISPUTED = "disputed"
+    REQUIRES_NEGOTIATION = "requires_negotiation"
+    FALSE_POSITIVE = "false_positive"
+    CUSTOM = "custom"
+
+
+class ActivityAction(StrEnum):
+    """Action recorded in the immutable compliance activity log."""
+
+    AUDIT_RUN = "audit_run"
+    CROSSREF_RUN = "crossref_run"
+    STATUS_CHANGED = "status_changed"
+    ANNOTATION_ADDED = "annotation_added"
+    ANNOTATION_UPDATED = "annotation_updated"
+    ANNOTATION_DELETED = "annotation_deleted"
+    DOCUMENT_EXPORTED = "document_exported"
+    PORTFOLIO_EXPORTED = "portfolio_exported"
+    BULK_STATUS_CHANGED = "bulk_status_changed"
+    BULK_EXPORTED = "bulk_exported"
+
+
+class CreateAnnotationRequest(BaseModel):
+    """Request body to create a human annotation on a target.
+
+    Attributes:
+        target_type: What the note is attached to.
+        target_reference: ``chunk_id`` (clause) / ``deviation_id`` (deviation);
+            ``None`` for document-level notes.
+        annotation_type: Reviewer classification.
+        note: The note text (10-2000 chars).
+    """
+
+    target_type: Literal["document", "clause", "deviation"]
+    target_reference: str | None = None
+    annotation_type: AnnotationType
+    note: str = Field(..., min_length=10, max_length=2000)
+
+    @model_validator(mode="after")
+    def validate_reference_required(self) -> CreateAnnotationRequest:
+        """Require a target reference for clause/deviation annotations."""
+        if self.target_type in ("clause", "deviation") and not self.target_reference:
+            raise ValueError(
+                f"target_reference is required when "
+                f"target_type is '{self.target_type}'"
+            )
+        return self
+
+
+class UpdateAnnotationRequest(BaseModel):
+    """Request body to edit an annotation's type and note."""
+
+    annotation_type: AnnotationType
+    note: str = Field(..., min_length=10, max_length=2000)
+
+
+class AnnotationResponse(BaseModel):
+    """A human annotation as returned by the API.
+
+    Attributes:
+        id: Annotation id.
+        document_id: Owning document.
+        target_type: What the note is attached to.
+        target_reference: Clause/deviation reference, or ``None``.
+        annotation_type: Reviewer classification.
+        note: The note text.
+        actor: Who recorded the note.
+        created_at: Creation timestamp.
+        updated_at: Last-edit timestamp.
+    """
+
+    id: str
+    document_id: str
+    target_type: str
+    target_reference: str | None
+    annotation_type: AnnotationType
+    note: str
+    actor: str
+    created_at: datetime
+    updated_at: datetime
+
+
+class BulkStatusRequest(BaseModel):
+    """Request body to change the workflow status of many contracts at once."""
+
+    document_ids: list[str] = Field(..., min_length=1, max_length=50)
+    status: str
+    note: str | None = Field(None, max_length=500)
+
+    @field_validator("status")
+    @classmethod
+    def validate_status(cls, value: str) -> str:
+        """Validate the status against the allowed workflow set."""
+        allowed = {"processing", "audited", "reviewed", "approved", "flagged"}
+        if value not in allowed:
+            raise ValueError(f"status must be one of {sorted(allowed)}")
+        return value
+
+
+class BulkExportRequest(BaseModel):
+    """Request body to export many contracts as a single zip.
+
+    Capped at 20: generating 20 PDFs synchronously is realistic on the current
+    Droplet; beyond that a background task + download link is needed
+    (see ``docs/SCALING_PATH.md``).
+    """
+
+    document_ids: list[str] = Field(..., min_length=1, max_length=20)

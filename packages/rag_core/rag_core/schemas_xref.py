@@ -83,6 +83,9 @@ class ClauseDeviation(BaseModel):
         severity: Deviation severity, 1 (trivial) to 10 (critical).
         explanation: Multi-sentence rationale mapping the deviation to specific
             language differences.
+        deviation_id: Stable id, populated when loaded from the normalized
+            ``crossref_deviations`` table; ``None`` for a freshly generated
+            object before persistence (so annotations can target it).
     """
 
     clause_type: str
@@ -95,6 +98,7 @@ class ClauseDeviation(BaseModel):
     deviation_type: DeviationType
     severity: int = Field(..., ge=1, le=10)
     explanation: str
+    deviation_id: str | None = None
 
 
 class CrossReferenceAuditSchema(BaseModel):
