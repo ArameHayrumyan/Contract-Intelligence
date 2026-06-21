@@ -115,7 +115,7 @@ export default function CrossReferencePage() {
 
           <div className="panel">
             <h3 style={{ marginTop: 0 }}>Deviations</h3>
-            <DeviationTable deviations={result.deviations} />
+            <DeviationTable deviations={result.deviations} documentId={documentId} />
           </div>
         </>
       ) : null}
