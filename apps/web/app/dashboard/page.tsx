@@ -5,6 +5,8 @@ import { useCallback, useEffect, useMemo, useState } from "react";
 import { ContractPanel, formatDate } from "@/components/ContractPanel";
 import { RiskBadge } from "@/components/RiskBadge";
 import {
+  bulkExport,
+  bulkUpdateStatus,
   downloadPdf,
   getDashboardSummary,
   listContracts,
@@ -13,7 +15,15 @@ import type {
   ContractFilters,
   ContractRow,
   DashboardSummary,
+  WorkflowStatus,
 } from "@/lib/types";
+
+const STATUS_OPTIONS: WorkflowStatus[] = [
+  "audited",
+  "reviewed",
+  "approved",
+  "flagged",
+];
 
 type RiskLevel = "all" | "low" | "medium" | "high";
 
@@ -45,6 +55,11 @@ export default function DashboardPage() {
   const [page, setPage] = useState(1);
   const [pageSize, setPageSize] = useState(20);
 
+  const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
+  const [bulkStatus, setBulkStatus] = useState<WorkflowStatus>("reviewed");
+  const [bulkBusy, setBulkBusy] = useState(false);
+  const [toast, setToast] = useState<string | null>(null);
+
   const filters = useMemo<ContractFilters>(() => {
     const f: ContractFilters = {
       ...RISK_RANGES[risk],
@@ -72,7 +87,59 @@ export default function DashboardPage() {
     void load();
   }, [load]);
 
+  // Selection does not span pages — clear it (with a toast) when the page moves.
+  useEffect(() => {
+    setSelectedIds((prev) => {
+      if (prev.size > 0) setToast("Selection cleared (page changed).");
+      return new Set();
+    });
+  }, [page]);
+
+  useEffect(() => {
+    if (!toast) return undefined;
+    const timer = setTimeout(() => setToast(null), 3000);
+    return () => clearTimeout(timer);
+  }, [toast]);
+
   const totalPages = Math.max(1, Math.ceil(total / pageSize));
+
+  function toggleRow(id: string) {
+    setSelectedIds((prev) => {
+      const next = new Set(prev);
+      if (next.has(id)) next.delete(id);
+      else next.add(id);
+      return next;
+    });
+  }
+
+  function toggleAll() {
+    setSelectedIds((prev) =>
+      prev.size === rows.length ? new Set() : new Set(rows.map((r) => r.document_id)),
+    );
+  }
+
+  async function applyBulkStatus() {
+    setBulkBusy(true);
+    try {
+      const result = await bulkUpdateStatus([...selectedIds], bulkStatus);
+      setToast(`Updated ${result.updated} contract(s).`);
+      setSelectedIds(new Set());
+      await load();
+    } catch {
+      setToast("Bulk update failed.");
+    } finally {
+      setBulkBusy(false);
+    }
+  }
+
+  async function exportSelected() {
+    setBulkBusy(true);
+    try {
+      await bulkExport([...selectedIds]);
+    } finally {
+      setBulkBusy(false);
+    }
+  }
 
   async function onExportPortfolio() {
     setExportingPortfolio(true);
@@ -151,6 +218,14 @@ export default function DashboardPage() {
       <table className="dev-table">
         <thead>
           <tr>
+            <th>
+              <input
+                type="checkbox"
+                checked={rows.length > 0 && selectedIds.size === rows.length}
+                onChange={toggleAll}
+                aria-label="Select all on this page"
+              />
+            </th>
             <th>Vendor</th><th>Type</th><th>Risk</th><th>Auto-Renewal</th>
             <th>Notice</th><th>End Date</th><th>Status</th><th>Uploaded</th><th>Actions</th>
           </tr>
@@ -158,6 +233,14 @@ export default function DashboardPage() {
         <tbody>
           {rows.map((r) => (
             <tr key={r.document_id} className="clickable" onClick={() => setSelected(r)}>
+              <td onClick={(e) => e.stopPropagation()}>
+                <input
+                  type="checkbox"
+                  checked={selectedIds.has(r.document_id)}
+                  onChange={() => toggleRow(r.document_id)}
+                  aria-label={`Select ${r.vendor_name}`}
+                />
+              </td>
               <td>{r.vendor_name}</td>
               <td>{r.contract_type}</td>
               <td><RiskBadge score={r.risk_score} /></td>
@@ -174,7 +257,7 @@ export default function DashboardPage() {
             </tr>
           ))}
           {rows.length === 0 ? (
-            <tr><td colSpan={9} className="muted">No contracts match these filters.</td></tr>
+            <tr><td colSpan={10} className="muted">No contracts match these filters.</td></tr>
           ) : null}
         </tbody>
       </table>
@@ -191,6 +274,34 @@ export default function DashboardPage() {
           onChange={(v) => { setPageSize(Number(v)); setPage(1); }}
           options={[["10", "10"], ["20", "20"], ["50", "50"]]} />
       </div>
+
+      {selectedIds.size > 0 ? (
+        <div className="bulk-bar">
+          <span>{selectedIds.size} contracts selected</span>
+          <select
+            value={bulkStatus}
+            onChange={(e) => setBulkStatus(e.target.value as WorkflowStatus)}
+          >
+            {STATUS_OPTIONS.map((s) => (
+              <option key={s} value={s}>
+                {s}
+              </option>
+            ))}
+          </select>
+          <button className="btn" onClick={() => void applyBulkStatus()} disabled={bulkBusy}>
+            Apply
+          </button>
+          <button className="btn" onClick={() => void exportSelected()} disabled={bulkBusy}>
+            Export Selected
+          </button>
+          <button className="link-btn" onClick={() => setSelectedIds(new Set())}>
+            Clear selection
+          </button>
+          {bulkBusy ? <span className="muted">Working…</span> : null}
+        </div>
+      ) : null}
+
+      {toast ? <div className="toast toast--ok">{toast}</div> : null}
 
       <ContractPanel contract={selected} onClose={() => setSelected(null)} />
     </div>

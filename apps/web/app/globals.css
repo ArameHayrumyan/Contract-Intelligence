@@ -360,3 +360,107 @@ tr.clickable:hover { background: rgba(127, 127, 127, 0.06); }
   .window-grid { grid-template-columns: 1fr; }
   .drawer { width: 100%; }
 }
+
+/* --- Annotations & activity (Tier 2) ------------------------------------ */
+.annotation-panel { margin-top: 10px; }
+.skeleton-line {
+  height: 12px;
+  background: var(--panel-2);
+  border-radius: 6px;
+  margin: 8px 0;
+  animation: pulse 1.2s ease-in-out infinite;
+}
+@keyframes pulse { 0%,100% { opacity: 0.5; } 50% { opacity: 1; } }
+
+.annotation {
+  border-left: 3px solid #6b7a99;
+  background: var(--panel-2);
+  border-radius: 0 8px 8px 0;
+  padding: 8px 12px;
+  margin-bottom: 8px;
+}
+.annotation textarea, .annotation select { margin-top: 6px; }
+.annotation-meta {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  font-size: 12px;
+  margin-top: 4px;
+}
+.annotation-actions { display: inline-flex; gap: 8px; }
+
+/* Left border + pill colour per annotation type (matches the PDF). */
+.ann--accepted_risk { border-left-color: var(--green); }
+.ann--escalate_to_legal { border-left-color: var(--red); }
+.ann--disputed,
+.ann--requires_negotiation { border-left-color: var(--amber); }
+.ann--false_positive { border-left-color: #6b7a99; }
+.ann--custom { border-left-color: var(--accent); }
+.ann-pill--accepted_risk { background: var(--green); }
+.ann-pill--escalate_to_legal { background: var(--red); }
+.ann-pill--disputed,
+.ann-pill--requires_negotiation { background: var(--amber); }
+.ann-pill--false_positive { background: #6b7a99; }
+.ann-pill--custom { background: var(--accent); }
+
+.annotation-form { margin-top: 12px; display: flex; flex-direction: column; gap: 6px; }
+.annotation-form-foot { display: flex; justify-content: space-between; font-size: 12px; }
+.char-count { text-align: right; }
+
+/* Tabs (audit detail). */
+.tab-bar { display: flex; gap: 4px; border-bottom: 1px solid var(--border); margin: 16px 0; }
+.tab {
+  background: none;
+  border: none;
+  color: var(--muted);
+  padding: 8px 16px;
+  cursor: pointer;
+  border-bottom: 2px solid transparent;
+}
+.tab--active { color: var(--text); border-bottom-color: var(--accent); }
+
+/* Activity timeline. */
+.timeline { border-left: 2px solid var(--border); margin-left: 8px; padding-left: 16px; }
+.timeline-row { position: relative; margin-bottom: 18px; }
+.timeline-dot {
+  position: absolute;
+  left: -23px;
+  top: 4px;
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+}
+.dot--blue { background: var(--accent); }
+.dot--amber { background: var(--amber); }
+.dot--purple { background: #9b5de5; }
+.dot--grey { background: #6b7a99; }
+.timeline-label { font-weight: 600; }
+.timeline-meta { font-size: 12px; }
+.code-block {
+  background: var(--panel-2);
+  border-radius: 6px;
+  padding: 8px;
+  font-size: 12px;
+  overflow-x: auto;
+  white-space: pre-wrap;
+}
+.action-group { display: flex; flex-direction: column; gap: 2px; font-size: 13px; }
+.check-row { display: flex; gap: 6px; align-items: center; font-size: 13px; }
+.check-row input { width: auto; }
+
+/* Bulk action bar (dashboard). */
+.bulk-bar {
+  position: fixed;
+  left: 50%;
+  transform: translateX(-50%);
+  bottom: 20px;
+  display: flex;
+  gap: 12px;
+  align-items: center;
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 10px 16px;
+  box-shadow: 0 6px 24px rgba(0, 0, 0, 0.4);
+  z-index: 55;
+}

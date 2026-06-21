@@ -163,6 +163,30 @@ record so the three portfolio features read persisted data, never the engine.
   data — they never re-run the engine. The web proxy forwards PDF bytes through a
   dedicated binary path (`proxyBinary`) so they are not text-corrupted.
 
+## Human annotations & the compliance activity log
+
+Tier 2 adds reviewer annotations at three granularities and an immutable audit
+trail of every mutation.
+
+- **Annotations** (`annotations` table) attach a typed reviewer note to a
+  *document*, a *clause* (by `chunk_id`), or a *deviation* (by `deviation_id`).
+  Deletes are **soft** (`deleted_at`) — the row never leaves the database, so the
+  record of what was once asserted survives. Deviations got stable ids via a new
+  normalized `crossref_deviations` table (written alongside the existing
+  cross-reference JSON blob, which is unchanged) so a note can target one.
+- **Activity log** (`activity_log` table) is **append-only**. Every state
+  mutation — audit run, cross-reference, status change, annotation add/edit/
+  delete, single/portfolio/bulk export, bulk status — writes a log entry. The
+  write happens **inside the same transaction as the mutation** (`_log(conn, …)`
+  in the database layer, not the router), so it is impossible to mutate state
+  without recording it. There is deliberately **no UPDATE/DELETE path** for the
+  table (a static test enforces this); see `docs/SCALING_PATH.md` for the
+  write-once production target.
+- **Bulk operations** (dashboard) validate that every id belongs to the caller's
+  tenant before touching anything (all-or-nothing, 403 on any foreign id). Bulk
+  export streams an in-memory zip of per-document PDFs; a single failure becomes
+  an `ERRORS.txt` entry rather than aborting the archive.
+
 ## Cross-cutting concerns
 
 - **Request correlation** — `RequestContextMiddleware` mints an `X-Request-ID`,

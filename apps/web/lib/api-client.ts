@@ -8,6 +8,11 @@
  */
 
 import type {
+  ActivityPage,
+  AnnotationResponse,
+  AnnotationTarget,
+  AnnotationType,
+  BulkStatusResult,
   ContractAudit,
   ContractFilters,
   ContractPage,
@@ -200,11 +205,21 @@ export async function saveThresholds(thresholds: number[]): Promise<number[]> {
   return (await parse<{ thresholds: number[] }>(res)).thresholds;
 }
 
-// --- PDF export ------------------------------------------------------------
+// --- PDF / zip export ------------------------------------------------------
 
-/** Download a PDF from a same-origin proxy route via a temporary anchor. */
-export async function downloadPdf(url: string, filename: string): Promise<void> {
-  const res = await fetch(url, { cache: "no-store" });
+/**
+ * Download a binary file (PDF or zip) from a same-origin proxy route.
+ *
+ * Works for GET (default) and POST (pass `init` with a method/body) — the
+ * MIME type is whatever the proxy streams back, so this handles both
+ * application/pdf and application/zip.
+ */
+export async function downloadPdf(
+  url: string,
+  filename: string,
+  init?: RequestInit,
+): Promise<void> {
+  const res = await fetch(url, { cache: "no-store", ...init });
   if (!res.ok) {
     throw new ApiError(`Export failed (${res.status})`, res.status);
   }
@@ -220,4 +235,136 @@ export async function downloadPdf(url: string, filename: string): Promise<void> 
   } finally {
     URL.revokeObjectURL(objectUrl);
   }
+}
+
+// --- Bulk operations -------------------------------------------------------
+
+/** Bulk-update workflow status for many contracts. */
+export async function bulkUpdateStatus(
+  documentIds: string[],
+  status: WorkflowStatus,
+  note?: string,
+): Promise<BulkStatusResult> {
+  const res = await fetch("/api/dashboard/contracts/bulk/status", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ document_ids: documentIds, status, note: note ?? null }),
+  });
+  return parse<BulkStatusResult>(res);
+}
+
+/** Download a zip of audit PDFs for the selected contracts. */
+export async function bulkExport(documentIds: string[]): Promise<void> {
+  const date = new Date().toISOString().slice(0, 10);
+  await downloadPdf(
+    "/api/dashboard/contracts/bulk/export",
+    `bulk_export_${date}_${documentIds.length}_contracts.zip`,
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ document_ids: documentIds }),
+    },
+  );
+}
+
+// --- Annotations -----------------------------------------------------------
+
+/** List a document's annotations, optionally filtered by target. */
+export async function listAnnotations(
+  documentId: string,
+  targetType?: AnnotationTarget,
+  targetReference?: string,
+): Promise<AnnotationResponse[]> {
+  const params = new URLSearchParams();
+  if (targetType) params.set("target_type", targetType);
+  if (targetReference) params.set("target_reference", targetReference);
+  const query = params.toString();
+  const res = await fetch(
+    `/api/documents/${encodeURIComponent(documentId)}/annotations${
+      query ? `?${query}` : ""
+    }`,
+    { cache: "no-store" },
+  );
+  return parse<AnnotationResponse[]>(res);
+}
+
+/** Create an annotation on a document / clause / deviation. */
+export async function createAnnotation(
+  documentId: string,
+  body: {
+    target_type: AnnotationTarget;
+    target_reference?: string | null;
+    annotation_type: AnnotationType;
+    note: string;
+  },
+): Promise<AnnotationResponse> {
+  const res = await fetch(
+    `/api/documents/${encodeURIComponent(documentId)}/annotations`,
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    },
+  );
+  return parse<AnnotationResponse>(res);
+}
+
+/** Edit an annotation's type and note. */
+export async function updateAnnotation(
+  documentId: string,
+  annotationId: string,
+  annotationType: AnnotationType,
+  note: string,
+): Promise<AnnotationResponse> {
+  const res = await fetch(
+    `/api/documents/${encodeURIComponent(documentId)}/annotations/${encodeURIComponent(annotationId)}`,
+    {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ annotation_type: annotationType, note }),
+    },
+  );
+  return parse<AnnotationResponse>(res);
+}
+
+/** Soft-delete an annotation. */
+export async function deleteAnnotation(
+  documentId: string,
+  annotationId: string,
+): Promise<void> {
+  const res = await fetch(
+    `/api/documents/${encodeURIComponent(documentId)}/annotations/${encodeURIComponent(annotationId)}`,
+    { method: "DELETE" },
+  );
+  if (!res.ok) {
+    throw new ApiError(`Delete failed (${res.status})`, res.status);
+  }
+}
+
+// --- Activity log ----------------------------------------------------------
+
+/** Fetch the tenant-wide activity log (paginated). */
+export async function getActivity(
+  page = 1,
+  pageSize = 50,
+): Promise<ActivityPage> {
+  const params = new URLSearchParams({
+    page: String(page),
+    page_size: String(pageSize),
+  });
+  const res = await fetch(`/api/activity?${params.toString()}`, {
+    cache: "no-store",
+  });
+  return parse<ActivityPage>(res);
+}
+
+/** Fetch one document's activity (bounded, single page). */
+export async function getDocumentActivity(
+  documentId: string,
+): Promise<ActivityPage> {
+  const res = await fetch(
+    `/api/documents/${encodeURIComponent(documentId)}/activity`,
+    { cache: "no-store" },
+  );
+  return parse<ActivityPage>(res);
 }

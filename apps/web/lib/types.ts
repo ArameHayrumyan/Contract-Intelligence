@@ -115,6 +115,57 @@ export interface RenewalReport {
   unknown_date?: { label: string; count: number; contracts: ContractRow[] };
 }
 
+// --- Annotations & activity log (Tier 2) -----------------------------------
+
+export type AnnotationType =
+  | "accepted_risk"
+  | "escalate_to_legal"
+  | "disputed"
+  | "requires_negotiation"
+  | "false_positive"
+  | "custom";
+
+export type AnnotationTarget = "document" | "clause" | "deviation";
+
+export interface AnnotationResponse {
+  id: string;
+  document_id: string;
+  target_type: AnnotationTarget;
+  target_reference: string | null;
+  annotation_type: AnnotationType;
+  note: string;
+  actor: string;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface ActivityEntry {
+  id: string;
+  tenant_id: string;
+  document_id: string | null;
+  actor: string;
+  action: string;
+  target_type: string | null;
+  target_reference: string | null;
+  from_value: Record<string, unknown> | null;
+  to_value: Record<string, unknown> | null;
+  metadata: Record<string, unknown> | null;
+  created_at: string;
+}
+
+export interface ActivityPage {
+  items: ActivityEntry[];
+  total: number;
+  page: number;
+  page_size: number;
+  total_pages: number;
+}
+
+export interface BulkStatusResult {
+  updated: number;
+  failed: string[];
+}
+
 export interface QACitation {
   chunk_id: string;
   document_id: string;
@@ -167,6 +218,7 @@ export interface ClauseDeviation {
   deviation_type: DeviationType;
   severity: number;
   explanation: string;
+  deviation_id: string | null;
 }
 
 export interface CrossReferenceAudit {

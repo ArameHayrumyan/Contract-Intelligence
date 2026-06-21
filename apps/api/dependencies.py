@@ -90,5 +90,23 @@ async def get_tenant_id(
     return user.tenant_id
 
 
+async def get_actor(
+    user: Annotated[CurrentUser, Depends(get_current_user)],
+) -> str:
+    """Resolve the actor identity for activity-log attribution.
+
+    Today this is the API-key principal's ``user_id``; with OIDC it becomes the
+    verified ``sub`` claim — without changing this signature.
+
+    Args:
+        user: The authenticated user (injected).
+
+    Returns:
+        The actor identifier recorded against mutations.
+    """
+    return user.user_id
+
+
 CurrentUserDep = Annotated[CurrentUser, Depends(get_current_user)]
 TenantIdDep = Annotated[str, Depends(get_tenant_id)]
+ActorDep = Annotated[str, Depends(get_actor)]

@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import json
 import logging
+import uuid
 from dataclasses import dataclass
 from datetime import UTC, date, datetime
 from pathlib import Path
@@ -33,9 +34,13 @@ from sqlalchemy import (
     select,
 )
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
-from sqlalchemy.ext.asyncio import AsyncEngine, create_async_engine
+from sqlalchemy.ext.asyncio import (
+    AsyncConnection,
+    AsyncEngine,
+    create_async_engine,
+)
 
-from rag_core.schemas import ContractAuditSchema
+from rag_core.schemas import ActivityAction, ContractAuditSchema
 from rag_core.schemas_xref import CrossReferenceAuditSchema
 
 logger = logging.getLogger("rag_core.database")
@@ -93,6 +98,77 @@ tenant_settings = Table(
     Column("tenant_id", String, primary_key=True),
     Column("renewal_thresholds", String, nullable=False),  # JSON array
     Column("updated_at", String, nullable=False),
+)
+
+# NB: the Python variable is ``annotations_table`` (not ``annotations``) because
+# ``from __future__ import annotations`` already binds the name ``annotations``;
+# the SQL table is still called "annotations".
+annotations_table = Table(
+    "annotations",
+    metadata,
+    Column("id", String, primary_key=True),  # UUID v4
+    Column("tenant_id", String, nullable=False),
+    Column("document_id", String, nullable=False),  # FK -> audit_results.id
+    Column("target_type", String, nullable=False),  # document | clause | deviation
+    Column("target_reference", String),  # chunk_id / deviation_id / NULL
+    Column("annotation_type", String, nullable=False),
+    Column("note", String, nullable=False),
+    Column("actor", String, nullable=False),
+    Column("created_at", String, nullable=False),
+    Column("updated_at", String, nullable=False),
+    Column("deleted_at", String),  # soft delete; non-null = hidden
+    Index("ix_annotations_doc", "tenant_id", "document_id"),
+    Index("ix_annotations_target", "tenant_id", "target_type", "target_reference"),
+)
+
+# COMPLIANCE: activity_log is APPEND-ONLY by design. There is intentionally NO
+# update_* or delete_* function for this table — the only writer is
+# insert_activity / _log. Any future code that issues UPDATE or DELETE against
+# activity_log must be rejected in code review (see test_activity.py, which
+# statically asserts no such SQL exists). At scale this becomes a write-once
+# store (CloudTrail / Postgres trigger) — see docs/SCALING_PATH.md.
+activity_log = Table(
+    "activity_log",
+    metadata,
+    Column("id", String, primary_key=True),  # UUID v4
+    Column("tenant_id", String, nullable=False),
+    Column("document_id", String),  # NULL for tenant-level actions
+    Column("actor", String, nullable=False),
+    Column("action", String, nullable=False),
+    Column("target_type", String),  # document | clause | deviation | NULL
+    Column("target_reference", String),  # chunk_id / deviation_id / NULL
+    Column("from_value", String),  # JSON, nullable
+    Column("to_value", String),  # JSON, nullable
+    Column("metadata", String),  # JSON, nullable
+    Column("created_at", String, nullable=False),  # primary sort field
+    Index("ix_activity_tenant_time", "tenant_id", "created_at"),
+    Index("ix_activity_doc_time", "tenant_id", "document_id", "created_at"),
+)
+
+# Normalized cross-reference deviations: stable per-deviation ids so annotations
+# can target a specific deviation. Written alongside the crossref_results JSON
+# blob (which is unchanged) at crossref time.
+crossref_deviations = Table(
+    "crossref_deviations",
+    metadata,
+    Column("id", String, primary_key=True),  # UUID v4, generated at crossref time
+    Column("crossref_id", String, nullable=False),  # FK -> crossref_results.id
+    Column("tenant_id", String, nullable=False),
+    Column("subject_document_id", String, nullable=False),
+    Column("clause_type", String, nullable=False),
+    Column("deviation_type", String, nullable=False),
+    Column("severity", Integer, nullable=False),
+    Column("subject_text", String, nullable=False),
+    Column("subject_chunk_id", String, nullable=False),
+    Column("subject_page", Integer),
+    Column("standard_text", String),
+    Column("standard_chunk_id", String),
+    Column("standard_page", Integer),
+    Column("explanation", String, nullable=False),
+    Column("created_at", String, nullable=False),
+    Index("ix_xrefdev_crossref", "crossref_id"),
+    Index("ix_xrefdev_subject", "tenant_id", "subject_document_id"),
+    Index("ix_xrefdev_type_sev", "tenant_id", "deviation_type", "severity"),
 )
 
 
@@ -180,6 +256,137 @@ def _require_engine() -> AsyncEngine:
     return _engine
 
 
+# --- Activity log (append-only) ----------------------------------------------
+
+
+async def _log(
+    conn: AsyncConnection,
+    *,
+    tenant_id: str,
+    actor: str,
+    action: ActivityAction | str,
+    document_id: str | None = None,
+    target_type: str | None = None,
+    target_reference: str | None = None,
+    from_value: dict[str, Any] | None = None,
+    to_value: dict[str, Any] | None = None,
+    metadata: dict[str, Any] | None = None,
+) -> None:
+    """Write one activity-log row **within an existing transaction**.
+
+    Mutation functions call this on the same connection as their write, so the
+    mutation and its audit record commit atomically — the log can never be
+    silently skipped.
+
+    Args:
+        conn: The open transaction connection.
+        tenant_id: Owning tenant.
+        actor: Who performed the action.
+        action: The :class:`ActivityAction`.
+        document_id: Affected document, if any.
+        target_type: ``document`` / ``clause`` / ``deviation`` / ``None``.
+        target_reference: chunk_id / deviation_id / ``None``.
+        from_value: Previous state (JSON-encoded).
+        to_value: New state (JSON-encoded).
+        metadata: Extra context (JSON-encoded).
+    """
+    await conn.execute(
+        activity_log.insert().values(
+            id=uuid.uuid4().hex,
+            tenant_id=tenant_id,
+            document_id=document_id,
+            actor=actor,
+            action=str(action),
+            target_type=target_type,
+            target_reference=target_reference,
+            from_value=json.dumps(from_value) if from_value is not None else None,
+            to_value=json.dumps(to_value) if to_value is not None else None,
+            metadata=json.dumps(metadata) if metadata is not None else None,
+            created_at=_now_iso(),
+        )
+    )
+
+
+async def insert_activity(
+    tenant_id: str,
+    actor: str,
+    action: ActivityAction | str,
+    document_id: str | None = None,
+    target_type: str | None = None,
+    target_reference: str | None = None,
+    from_value: dict[str, Any] | None = None,
+    to_value: dict[str, Any] | None = None,
+    metadata: dict[str, Any] | None = None,
+) -> None:
+    """Append one activity-log entry in its own transaction.
+
+    Used by the router layer (e.g. exports) where the action does not happen
+    inside a database mutation. There is intentionally no update/delete
+    counterpart — the log is append-only.
+
+    Args: see :func:`_log`.
+    """
+    async with _require_engine().begin() as conn:
+        await _log(
+            conn,
+            tenant_id=tenant_id,
+            actor=actor,
+            action=action,
+            document_id=document_id,
+            target_type=target_type,
+            target_reference=target_reference,
+            from_value=from_value,
+            to_value=to_value,
+            metadata=metadata,
+        )
+
+
+async def list_activity(
+    tenant_id: str,
+    document_id: str | None = None,
+    page: int = 1,
+    page_size: int = 50,
+) -> dict[str, Any]:
+    """Return the tenant's activity log, newest first, paginated.
+
+    Args:
+        tenant_id: Owning tenant.
+        document_id: Restrict to one document when given.
+        page: 1-based page number.
+        page_size: Rows per page.
+
+    Returns:
+        ``{items, total, page, page_size, total_pages}``.
+    """
+    conditions = [activity_log.c.tenant_id == tenant_id]
+    if document_id is not None:
+        conditions.append(activity_log.c.document_id == document_id)
+    where = and_(*conditions)
+    page = max(1, page)
+    page_size = max(1, page_size)
+
+    count_query = select(func.count()).select_from(activity_log).where(where)
+    rows_query = (
+        select(activity_log)
+        .where(where)
+        .order_by(activity_log.c.created_at.desc())
+        .limit(page_size)
+        .offset((page - 1) * page_size)
+    )
+    async with _require_engine().connect() as conn:
+        total = (await conn.execute(count_query)).scalar_one()
+        rows = (await conn.execute(rows_query)).mappings().all()
+    items = [_decode_activity_row(r) for r in rows]
+    total_pages = (total + page_size - 1) // page_size if total else 0
+    return {
+        "items": items,
+        "total": total,
+        "page": page,
+        "page_size": page_size,
+        "total_pages": total_pages,
+    }
+
+
 # --- Audit results -----------------------------------------------------------
 
 
@@ -188,8 +395,11 @@ async def upsert_audit_result(
     document_id: str,
     tenant_id: str,
     contract_end_date: date | None,
+    actor: str = "system",
 ) -> None:
     """Insert or update an audit result, preserving workflow status on update.
+
+    Also appends an ``AUDIT_RUN`` activity-log entry in the same transaction.
 
     Args:
         result: The structured audit.
@@ -236,6 +446,15 @@ async def upsert_audit_result(
     )
     async with _require_engine().begin() as conn:
         await conn.execute(statement)
+        await _log(
+            conn,
+            tenant_id=tenant_id,
+            actor=actor,
+            action=ActivityAction.AUDIT_RUN,
+            document_id=document_id,
+            target_type="document",
+            to_value={"risk_score": result.risk_score},
+        )
 
 
 async def get_audit_result(document_id: str, tenant_id: str) -> dict[str, Any] | None:
@@ -315,15 +534,22 @@ async def list_audit_results(
 
 
 async def update_audit_status(
-    document_id: str, tenant_id: str, status: str, note: str | None
+    document_id: str,
+    tenant_id: str,
+    status: str,
+    note: str | None,
+    actor: str = "system",
 ) -> dict[str, Any] | None:
     """Update the workflow status (and optional note) of an audit row.
+
+    Logs a ``STATUS_CHANGED`` activity entry (with from/to status) atomically.
 
     Args:
         document_id: The document id.
         tenant_id: Owning tenant.
         status: New status (validated against the allowed set).
         note: Optional human annotation.
+        actor: Who changed the status.
 
     Returns:
         The updated row, or ``None`` if it does not exist.
@@ -333,6 +559,9 @@ async def update_audit_status(
     """
     if status not in _VALID_STATUSES:
         raise ValueError(f"Invalid status {status!r}; allowed: {sorted(_VALID_STATUSES)}")
+    existing = await get_audit_result(document_id, tenant_id)
+    if existing is None:
+        return None
     now = _now_iso()
     statement = (
         audit_results.update()
@@ -346,6 +575,16 @@ async def update_audit_status(
     )
     async with _require_engine().begin() as conn:
         await conn.execute(statement)
+        await _log(
+            conn,
+            tenant_id=tenant_id,
+            actor=actor,
+            action=ActivityAction.STATUS_CHANGED,
+            document_id=document_id,
+            target_type="document",
+            from_value={"status": existing["status"]},
+            to_value={"status": status, "note": note},
+        )
     return await get_audit_result(document_id, tenant_id)
 
 
@@ -353,27 +592,56 @@ async def update_audit_status(
 
 
 async def upsert_crossref_result(
-    result: CrossReferenceAuditSchema, tenant_id: str
+    result: CrossReferenceAuditSchema, tenant_id: str, actor: str = "system"
 ) -> None:
     """Persist a cross-reference run and flag its subject as having one.
 
+    Each deviation gets a stable ``deviation_id`` (so annotations can target it):
+    the id is set on the in-memory object, embedded in the stored JSON blob
+    (preserving order), and written as a normalized ``crossref_deviations`` row.
+    Logs a ``CROSSREF_RUN`` activity entry. All in one transaction.
+
     Args:
-        result: The cross-reference audit.
+        result: The cross-reference audit (mutated to carry deviation ids).
         tenant_id: Owning tenant.
+        actor: Who ran the cross-reference.
     """
-    import uuid
+    crossref_id = uuid.uuid4().hex
+    now = _now_iso()
+    for deviation in result.deviations:
+        deviation.deviation_id = uuid.uuid4().hex
 
     values = {
-        "id": uuid.uuid4().hex,
+        "id": crossref_id,
         "tenant_id": tenant_id,
         "subject_document_id": result.subject_document_id,
         "standard_document_id": result.standard_document_id,
         "standard_version": result.standard_version,
         "overall_risk_score": result.overall_risk_score,
         "executive_summary": result.executive_summary,
-        "deviations": result.model_dump_json(),
-        "created_at": _now_iso(),
+        "deviations": result.model_dump_json(),  # blob now carries deviation_ids
+        "created_at": now,
     }
+    deviation_rows = [
+        {
+            "id": d.deviation_id,
+            "crossref_id": crossref_id,
+            "tenant_id": tenant_id,
+            "subject_document_id": result.subject_document_id,
+            "clause_type": d.clause_type,
+            "deviation_type": str(d.deviation_type),
+            "severity": d.severity,
+            "subject_text": d.subject_text,
+            "subject_chunk_id": d.subject_chunk_id,
+            "subject_page": d.subject_page,
+            "standard_text": d.standard_text,
+            "standard_chunk_id": d.standard_chunk_id,
+            "standard_page": d.standard_page,
+            "explanation": d.explanation,
+            "created_at": now,
+        }
+        for d in result.deviations
+    ]
     flag = (
         audit_results.update()
         .where(
@@ -386,7 +654,308 @@ async def upsert_crossref_result(
     )
     async with _require_engine().begin() as conn:
         await conn.execute(crossref_results.insert().values(**values))
+        if deviation_rows:
+            await conn.execute(crossref_deviations.insert(), deviation_rows)
         await conn.execute(flag)
+        await _log(
+            conn,
+            tenant_id=tenant_id,
+            actor=actor,
+            action=ActivityAction.CROSSREF_RUN,
+            document_id=result.subject_document_id,
+            target_type="document",
+            to_value={"overall_risk_score": result.overall_risk_score},
+        )
+
+
+async def deviation_exists(
+    tenant_id: str, subject_document_id: str, deviation_id: str
+) -> bool:
+    """Whether a deviation id exists for a tenant's document (annotation guard).
+
+    Args:
+        tenant_id: Owning tenant.
+        subject_document_id: The audited contract id.
+        deviation_id: The deviation id to verify.
+
+    Returns:
+        ``True`` if the deviation belongs to this tenant + document.
+    """
+    query = select(func.count()).select_from(crossref_deviations).where(
+        and_(
+            crossref_deviations.c.id == deviation_id,
+            crossref_deviations.c.tenant_id == tenant_id,
+            crossref_deviations.c.subject_document_id == subject_document_id,
+        )
+    )
+    async with _require_engine().connect() as conn:
+        return bool((await conn.execute(query)).scalar_one())
+
+
+# --- Annotations -------------------------------------------------------------
+
+
+async def _get_annotation(
+    annotation_id: str, tenant_id: str
+) -> dict[str, Any] | None:
+    """Fetch a non-deleted annotation by id for a tenant, or ``None``."""
+    query = select(annotations_table).where(
+        and_(
+            annotations_table.c.id == annotation_id,
+            annotations_table.c.tenant_id == tenant_id,
+            annotations_table.c.deleted_at.is_(None),
+        )
+    )
+    async with _require_engine().connect() as conn:
+        row = (await conn.execute(query)).mappings().first()
+    return dict(row) if row else None
+
+
+async def create_annotation(
+    tenant_id: str,
+    document_id: str,
+    target_type: str,
+    target_reference: str | None,
+    annotation_type: str,
+    note: str,
+    actor: str,
+) -> dict[str, Any]:
+    """Create a human annotation and log it atomically.
+
+    Args:
+        tenant_id: Owning tenant.
+        document_id: Annotated document.
+        target_type: ``document`` / ``clause`` / ``deviation``.
+        target_reference: chunk_id / deviation_id / ``None``.
+        annotation_type: Reviewer classification.
+        note: Note text.
+        actor: Who recorded the note.
+
+    Returns:
+        The created annotation row.
+    """
+    now = _now_iso()
+    values = {
+        "id": uuid.uuid4().hex,
+        "tenant_id": tenant_id,
+        "document_id": document_id,
+        "target_type": target_type,
+        "target_reference": target_reference,
+        "annotation_type": annotation_type,
+        "note": note,
+        "actor": actor,
+        "created_at": now,
+        "updated_at": now,
+        "deleted_at": None,
+    }
+    async with _require_engine().begin() as conn:
+        await conn.execute(annotations_table.insert().values(**values))
+        await _log(
+            conn,
+            tenant_id=tenant_id,
+            actor=actor,
+            action=ActivityAction.ANNOTATION_ADDED,
+            document_id=document_id,
+            target_type=target_type,
+            target_reference=target_reference,
+            to_value={"note": note, "type": annotation_type},
+        )
+    return values
+
+
+async def list_annotations(
+    tenant_id: str,
+    document_id: str,
+    target_type: str | None = None,
+    target_reference: str | None = None,
+) -> list[dict[str, Any]]:
+    """List non-deleted annotations for a document, newest first.
+
+    Args:
+        tenant_id: Owning tenant.
+        document_id: The document.
+        target_type: Optional filter.
+        target_reference: Optional filter.
+
+    Returns:
+        Matching annotation rows (soft-deleted excluded).
+    """
+    conditions = [
+        annotations_table.c.tenant_id == tenant_id,
+        annotations_table.c.document_id == document_id,
+        annotations_table.c.deleted_at.is_(None),
+    ]
+    if target_type:
+        conditions.append(annotations_table.c.target_type == target_type)
+    if target_reference:
+        conditions.append(annotations_table.c.target_reference == target_reference)
+    query = (
+        select(annotations_table)
+        .where(and_(*conditions))
+        .order_by(annotations_table.c.created_at.desc())
+    )
+    async with _require_engine().connect() as conn:
+        rows = (await conn.execute(query)).mappings().all()
+    return [dict(r) for r in rows]
+
+
+async def update_annotation(
+    annotation_id: str,
+    tenant_id: str,
+    note: str,
+    annotation_type: str,
+    actor: str,
+) -> dict[str, Any] | None:
+    """Edit an annotation's note/type and log the change atomically.
+
+    Args:
+        annotation_id: The annotation to edit.
+        tenant_id: Owning tenant.
+        note: New note text.
+        annotation_type: New classification.
+        actor: Who edited.
+
+    Returns:
+        The updated annotation, or ``None`` if not found.
+    """
+    existing = await _get_annotation(annotation_id, tenant_id)
+    if existing is None:
+        return None
+    now = _now_iso()
+    statement = (
+        annotations_table.update()
+        .where(
+            and_(
+                annotations_table.c.id == annotation_id,
+                annotations_table.c.tenant_id == tenant_id,
+            )
+        )
+        .values(note=note, annotation_type=annotation_type, updated_at=now)
+    )
+    async with _require_engine().begin() as conn:
+        await conn.execute(statement)
+        await _log(
+            conn,
+            tenant_id=tenant_id,
+            actor=actor,
+            action=ActivityAction.ANNOTATION_UPDATED,
+            document_id=existing["document_id"],
+            target_type=existing["target_type"],
+            target_reference=existing["target_reference"],
+            from_value={"note": existing["note"], "type": existing["annotation_type"]},
+            to_value={"note": note, "type": annotation_type},
+        )
+    return await _get_annotation(annotation_id, tenant_id)
+
+
+async def delete_annotation(
+    annotation_id: str, tenant_id: str, actor: str
+) -> bool:
+    """Soft-delete an annotation (sets ``deleted_at``) and log it.
+
+    Hard delete is intentionally not implemented — the deletion itself is
+    recorded in the append-only activity log.
+
+    Args:
+        annotation_id: The annotation to delete.
+        tenant_id: Owning tenant.
+        actor: Who deleted it.
+
+    Returns:
+        ``True`` if an annotation was deleted, ``False`` if not found.
+    """
+    existing = await _get_annotation(annotation_id, tenant_id)
+    if existing is None:
+        return False
+    now = _now_iso()
+    statement = (
+        annotations_table.update()
+        .where(
+            and_(
+                annotations_table.c.id == annotation_id,
+                annotations_table.c.tenant_id == tenant_id,
+            )
+        )
+        .values(deleted_at=now, updated_at=now)
+    )
+    async with _require_engine().begin() as conn:
+        await conn.execute(statement)
+        await _log(
+            conn,
+            tenant_id=tenant_id,
+            actor=actor,
+            action=ActivityAction.ANNOTATION_DELETED,
+            document_id=existing["document_id"],
+            target_type=existing["target_type"],
+            target_reference=existing["target_reference"],
+            from_value={"note": existing["note"], "type": existing["annotation_type"]},
+        )
+    return True
+
+
+# --- Bulk operations ---------------------------------------------------------
+
+
+async def bulk_update_status(
+    document_ids: list[str],
+    tenant_id: str,
+    status: str,
+    note: str | None,
+    actor: str,
+) -> dict[str, Any]:
+    """Change the workflow status of many contracts in one transaction.
+
+    Per-document status changes are rolled into a single ``BULK_STATUS_CHANGED``
+    activity entry (the document_ids and count are in its metadata).
+
+    Args:
+        document_ids: Documents to update.
+        tenant_id: Owning tenant.
+        status: New status.
+        note: Optional shared note.
+        actor: Who performed the bulk action.
+
+    Returns:
+        ``{updated: int, failed: list[str]}``.
+
+    Raises:
+        ValueError: If ``status`` is invalid.
+    """
+    if status not in _VALID_STATUSES:
+        raise ValueError(f"Invalid status {status!r}; allowed: {sorted(_VALID_STATUSES)}")
+    now = _now_iso()
+    updated = 0
+    failed: list[str] = []
+    async with _require_engine().begin() as conn:
+        for document_id in document_ids:
+            result = await conn.execute(
+                audit_results.update()
+                .where(
+                    and_(
+                        audit_results.c.id == document_id,
+                        audit_results.c.tenant_id == tenant_id,
+                    )
+                )
+                .values(
+                    status=status,
+                    status_note=note,
+                    status_updated_at=now,
+                    updated_at=now,
+                )
+            )
+            if result.rowcount:
+                updated += 1
+            else:
+                failed.append(document_id)
+        await _log(
+            conn,
+            tenant_id=tenant_id,
+            actor=actor,
+            action=ActivityAction.BULK_STATUS_CHANGED,
+            to_value={"status": status},
+            metadata={"count": updated, "document_ids": document_ids},
+        )
+    return {"updated": updated, "failed": failed}
 
 
 async def get_crossref_by_subject(
@@ -560,4 +1129,20 @@ def _decode_audit_row(row: Any) -> dict[str, Any]:
     data["document_id"] = data["id"]  # consumer-friendly alias for the PK
     raw_clauses = data.get("critical_clauses")
     data["critical_clauses"] = json.loads(raw_clauses) if raw_clauses else []
+    return data
+
+
+def _decode_activity_row(row: Any) -> dict[str, Any]:
+    """Convert an activity-log row to a dict, decoding its JSON fields.
+
+    Args:
+        row: A SQLAlchemy ``RowMapping``.
+
+    Returns:
+        A plain dict with ``from_value`` / ``to_value`` / ``metadata`` decoded.
+    """
+    data = dict(row)
+    for field in ("from_value", "to_value", "metadata"):
+        raw = data.get(field)
+        data[field] = json.loads(raw) if raw else None
     return data

@@ -44,6 +44,26 @@ These are fixed requirements, not defaults to optimise away:
   behind a dedicated embedding service or the managed store's native embeddings
   to free API memory.
 
+## Compliance activity log
+
+- The `activity_log` table is **append-only by design**: there is no UPDATE or
+  DELETE function for it anywhere in `database.py` (a static test asserts this),
+  and the only writer is `insert_activity` / `_log`. Not even the tenant can
+  delete a log entry through the API.
+- At production scale this moves to an **immutable / write-once audit store** —
+  AWS CloudTrail, Azure Monitor, or a Postgres table with a trigger that rejects
+  `UPDATE`/`DELETE`. The constraint is architectural (no mutation path exists),
+  not merely "we didn't build the endpoint," so the swap is additive.
+- Mutations write their log entry **in the same transaction** as the mutation
+  (`_log(conn, …)`), so an action and its audit record commit atomically.
+
+## Bulk operations
+
+- **Bulk export** is capped at **20 documents** and generates PDFs synchronously,
+  zipped in memory. That is realistic on the current Droplet; beyond it, move PDF
+  generation to a background task (Celery) that writes the zip to object storage
+  and returns a signed download link. **Bulk status** is capped at 50.
+
 ## Document parsing
 
 - **If document types expand beyond PDF** (invoices, emails, HTML exports):

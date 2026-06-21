@@ -517,7 +517,12 @@ class ContractService:
         return record
 
     async def cross_reference(
-        self, *, tenant_id: str, document_id: str, standard_document_id: str
+        self,
+        *,
+        tenant_id: str,
+        document_id: str,
+        standard_document_id: str,
+        actor: str = "system",
     ) -> CrossReferenceAuditSchema:
         """Cross-reference a contract against a standard, both tenant-scoped.
 
@@ -525,6 +530,7 @@ class ContractService:
             tenant_id: The caller's tenant.
             document_id: The subject contract.
             standard_document_id: The standard to compare against.
+            actor: Who initiated the run (for the activity log).
 
         Returns:
             The :class:`CrossReferenceAuditSchema`.
@@ -551,12 +557,26 @@ class ContractService:
         # Persist for the dashboard/export (sets has_crossref on the audit row).
         # Best-effort: a storage failure must not fail the cross-reference.
         try:
-            await upsert_crossref_result(result, tenant_id=tenant_id)
+            await upsert_crossref_result(result, tenant_id=tenant_id, actor=actor)
         except Exception:  # noqa: BLE001 - persistence is best-effort
             logger.exception(
                 "Failed to persist cross-reference for document=%s", document_id
             )
         return result
+
+    def chunk_exists(self, *, tenant_id: str, document_id: str, chunk_id: str) -> bool:
+        """Whether a chunk id exists in a tenant's document (annotation guard).
+
+        Args:
+            tenant_id: The caller's tenant.
+            document_id: The document to look within.
+            chunk_id: The chunk id to verify.
+
+        Returns:
+            ``True`` if the chunk belongs to that tenant's document.
+        """
+        chunks = self._store.get_document_chunks(tenant_id, document_id)
+        return any(c.chunk_id == chunk_id for c in chunks)
 
     def shutdown(self) -> None:
         """Cleanly stop the ingestion executor (called on app shutdown)."""
