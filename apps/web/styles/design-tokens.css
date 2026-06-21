@@ -1,0 +1,98 @@
+/**
+ * Design tokens — the single source of truth for colour, spacing, type, radii,
+ * and shadows. Every component references these variables; no hardcoded hex
+ * values live anywhere else in the app.
+ */
+
+:root {
+  /* Core palette — dark navy, formalized */
+  --color-bg-base: #0d1117;
+  --color-bg-surface: #161b22;
+  --color-bg-elevated: #21262d;
+  --color-bg-overlay: #30363d;
+
+  --color-border-subtle: #21262d;
+  --color-border-default: #30363d;
+  --color-border-emphasis: #6e7681;
+
+  --color-text-primary: #e6edf3;
+  --color-text-secondary: #8b949e;
+  --color-text-muted: #484f58;
+  --color-text-link: #58a6ff;
+
+  --color-accent-blue: #1f6feb;
+  --color-accent-blue-hover: #388bfd;
+  --color-accent-blue-subtle: #0d419d22;
+
+  /* Risk colours */
+  --color-risk-high: #f85149;
+  --color-risk-high-bg: #490202;
+  --color-risk-high-border: #6e1313;
+  --color-risk-medium: #e3b341;
+  --color-risk-medium-bg: #341a00;
+  --color-risk-medium-border: #4d2d00;
+  --color-risk-low: #3fb950;
+  --color-risk-low-bg: #0f2d12;
+  --color-risk-low-border: #1a4d1e;
+
+  /* Status colours */
+  --color-status-processing: #8b949e;
+  --color-status-audited: #8b949e;
+  --color-status-reviewed: #58a6ff;
+  --color-status-approved: #3fb950;
+  --color-status-flagged: #f85149;
+
+  /* Deviation colours */
+  --color-deviation-missing: #f85149;
+  --color-deviation-contradictory: #f85149;
+  --color-deviation-weakened: #e3b341;
+  --color-deviation-strengthened: #58a6ff;
+  --color-deviation-unaddressed: #8b949e;
+
+  /* Annotation colours (reuse risk/status hues) */
+  --color-annotation-accepted_risk: #3fb950;
+  --color-annotation-escalate_to_legal: #f85149;
+  --color-annotation-disputed: #e3b341;
+  --color-annotation-requires_negotiation: #e3b341;
+  --color-annotation-false_positive: #8b949e;
+  --color-annotation-custom: #58a6ff;
+
+  /* Spacing scale */
+  --space-1: 4px;
+  --space-2: 8px;
+  --space-3: 12px;
+  --space-4: 16px;
+  --space-5: 20px;
+  --space-6: 24px;
+  --space-8: 32px;
+  --space-10: 40px;
+  --space-12: 48px;
+
+  /* Typography — Inter / JetBrains Mono loaded via next/font in layout.tsx,
+     exposed as --font-inter / --font-jetbrains with system fallbacks. */
+  --font-sans: var(--font-inter), -apple-system, BlinkMacSystemFont, "Segoe UI",
+    Roboto, sans-serif;
+  --font-mono: var(--font-jetbrains), "Fira Code", ui-monospace, monospace;
+  --text-xs: 11px;
+  --text-sm: 13px;
+  --text-base: 14px;
+  --text-lg: 16px;
+  --text-xl: 20px;
+  --text-2xl: 24px;
+  --text-3xl: 30px;
+
+  /* Radii */
+  --radius-sm: 4px;
+  --radius-md: 6px;
+  --radius-lg: 8px;
+  --radius-xl: 12px;
+
+  /* Shadows */
+  --shadow-sm: 0 1px 3px rgba(0, 0, 0, 0.4);
+  --shadow-md: 0 4px 12px rgba(0, 0, 0, 0.5);
+  --shadow-lg: 0 8px 32px rgba(0, 0, 0, 0.6);
+  --shadow-overlay: 0 16px 64px rgba(0, 0, 0, 0.8);
+
+  /* Layout */
+  --nav-height: 56px;
+}
