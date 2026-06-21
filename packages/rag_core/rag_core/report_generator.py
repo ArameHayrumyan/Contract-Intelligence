@@ -48,6 +48,18 @@ _RED_TINT = HexColor("#FDE8E8")
 _AMBER_TINT = HexColor("#FEF3E2")
 _GREY_TINT = HexColor("#EEF1F5")
 
+_ANNOTATION_GREY = HexColor("#6B7A99")
+_ANNOTATION_BLUE = HexColor("#4F8CFF")
+#: Annotation-type → accent colour (left border), shared with the web UI.
+_ANNOTATION_COLORS = {
+    "accepted_risk": RISK_GREEN,
+    "escalate_to_legal": RISK_RED,
+    "disputed": RISK_AMBER,
+    "requires_negotiation": RISK_AMBER,
+    "false_positive": _ANNOTATION_GREY,
+    "custom": _ANNOTATION_BLUE,
+}
+
 _PAGE_W, _PAGE_H = A4
 
 
@@ -164,6 +176,7 @@ class ReportGenerator:
         audit: ContractAuditSchema,
         document_id: str,
         crossref: CrossReferenceAuditSchema | None,
+        annotations: list[dict[str, Any]],
         tenant_id: str,
     ) -> bytes:
         """Generate a single-contract audit PDF.
@@ -172,11 +185,13 @@ class ReportGenerator:
             audit: The structured audit.
             document_id: The audited document id.
             crossref: Optional cross-reference result to append.
+            annotations: Human annotations (document / clause / deviation level).
             tenant_id: Owning tenant (shown for traceability).
 
         Returns:
             Raw PDF bytes.
         """
+        doc_notes, by_chunk, by_deviation = _split_annotations(annotations)
         buffer = io.BytesIO()
         doc = SimpleDocTemplate(
             buffer,
@@ -188,10 +203,10 @@ class ReportGenerator:
             title="Contract Audit Report",
         )
         story: list[Flowable] = [PageBreak()]  # page 1 is the canvas-drawn cover
-        story += self._executive_summary(audit)
-        story += self._critical_clauses(audit.critical_clauses)
+        story += self._executive_summary(audit, doc_notes)
+        story += self._critical_clauses(audit.critical_clauses, by_chunk)
         if crossref is not None:
-            story += self._crossref_section(crossref)
+            story += self._crossref_section(crossref, by_deviation)
 
         def cover(canvas: Canvas, _doc: SimpleDocTemplate) -> None:
             self._draw_cover(
@@ -209,8 +224,10 @@ class ReportGenerator:
         doc.build(story, onFirstPage=cover, canvasmaker=_NumberedCanvas)
         return buffer.getvalue()
 
-    def _executive_summary(self, audit: ContractAuditSchema) -> list[Flowable]:
-        """Build the executive-summary flowables."""
+    def _executive_summary(
+        self, audit: ContractAuditSchema, doc_notes: list[dict[str, Any]]
+    ) -> list[Flowable]:
+        """Build the executive-summary flowables (+ document reviewer notes)."""
         risk_bg = _risk_color(audit.risk_score)
         info = [
             ["Vendor", audit.vendor_name],
@@ -234,16 +251,27 @@ class ReportGenerator:
                 ]
             )
         )
-        return [
+        out: list[Flowable] = [
             Paragraph("EXECUTIVE SUMMARY", self._h1),
             table,
             Spacer(1, 8 * mm),
-            Paragraph(audit.risk_rationale, self._body),
-            PageBreak(),
         ]
+        if doc_notes:
+            out.append(Paragraph("REVIEWER NOTES", self._h2))
+            for note in doc_notes:
+                out.append(self._annotation_box(note))
+                out.append(Spacer(1, 3 * mm))
+            out.append(Spacer(1, 3 * mm))
+        out.append(Paragraph(audit.risk_rationale, self._body))
+        out.append(PageBreak())
+        return out
 
-    def _critical_clauses(self, clauses: list[CriticalClause]) -> list[Flowable]:
-        """Build the critical-clauses flowables."""
+    def _critical_clauses(
+        self,
+        clauses: list[CriticalClause],
+        by_chunk: dict[str, list[dict[str, Any]]],
+    ) -> list[Flowable]:
+        """Build the critical-clauses flowables (+ inline clause annotations)."""
         out: list[Flowable] = [Paragraph("CRITICAL CLAUSES", self._h1)]
         if not clauses:
             out.append(Paragraph("No critical clauses identified.", self._body))
@@ -271,13 +299,17 @@ class ReportGenerator:
                 )
             )
             out.append(box)
+            for note in by_chunk.get(clause.source_chunk_id, []):
+                out.append(self._annotation_box(note))
             out.append(Spacer(1, 4 * mm))
         return out
 
     def _crossref_section(
-        self, crossref: CrossReferenceAuditSchema
+        self,
+        crossref: CrossReferenceAuditSchema,
+        by_deviation: dict[str, list[dict[str, Any]]],
     ) -> list[Flowable]:
-        """Build the cross-reference findings flowables."""
+        """Build the cross-reference findings flowables (+ deviation notes)."""
         out: list[Flowable] = [
             PageBreak(),
             Paragraph("CROSS-REFERENCE AUDIT", self._h1),
@@ -326,11 +358,64 @@ class ReportGenerator:
                 style.append(("SPAN", (0, cmp_row), (1, cmp_row)))
                 style.append(("SPAN", (2, cmp_row), (3, cmp_row)))
                 style.append(("BACKGROUND", (0, cmp_row), (-1, cmp_row), colors.whitesmoke))
+            for note in by_deviation.get(dev.deviation_id or "", []):
+                label = note["annotation_type"].replace("_", " ").upper()
+                data.append(
+                    [
+                        Paragraph(
+                            f"NOTE [{label}]: {note['note']} "
+                            f"<i>— {note['actor']}</i>",
+                            self._cell,
+                        ),
+                        "",
+                        "",
+                        "",
+                    ]
+                )
+                note_row = len(data) - 1
+                style.append(("SPAN", (0, note_row), (-1, note_row)))
+                style.append(
+                    ("LINEBEFORE", (0, note_row), (0, note_row), 3,
+                     _annotation_color(note["annotation_type"]))
+                )
+                style.append(
+                    ("BACKGROUND", (0, note_row), (-1, note_row), colors.white)
+                )
 
         table = Table(data, colWidths=[32 * mm, 24 * mm, 16 * mm, 93 * mm], repeatRows=1)
         table.setStyle(TableStyle(style))
         out.append(table)
         return out
+
+    def _annotation_box(self, annotation: dict[str, Any]) -> Table:
+        """Render one annotation as a shaded, colour-bordered box."""
+        label = annotation["annotation_type"].replace("_", " ").upper()
+        recorded = (
+            f"Recorded by {annotation['actor']} on "
+            f"{_fmt_date(annotation.get('created_at'))}"
+        )
+        box = Table(
+            [
+                [Paragraph(f"<b>{label}</b>", self._cell)],
+                [Paragraph(annotation["note"], self._body)],
+                [Paragraph(recorded, self._small_grey)],
+            ],
+            colWidths=[160 * mm],
+        )
+        box.setStyle(
+            TableStyle(
+                [
+                    ("BACKGROUND", (0, 0), (-1, -1), ACCENT_COLOR),
+                    ("LINEBEFORE", (0, 0), (0, -1), 3,
+                     _annotation_color(annotation["annotation_type"])),
+                    ("LEFTPADDING", (0, 0), (-1, -1), 8),
+                    ("RIGHTPADDING", (0, 0), (-1, -1), 8),
+                    ("TOPPADDING", (0, 0), (-1, -1), 4),
+                    ("BOTTOMPADDING", (0, 0), (-1, -1), 4),
+                ]
+            )
+        )
+        return box
 
     # --- Portfolio -----------------------------------------------------------
 
@@ -543,6 +628,41 @@ class ReportGenerator:
             22 * mm,
             "CONFIDENTIAL — Generated by Secure Contract Intelligence",
         )
+
+
+def _annotation_color(annotation_type: str) -> HexColor:
+    """Accent colour for an annotation type (left border)."""
+    return _ANNOTATION_COLORS.get(annotation_type, _ANNOTATION_GREY)
+
+
+def _split_annotations(
+    annotations: list[dict[str, Any]],
+) -> tuple[
+    list[dict[str, Any]],
+    dict[str, list[dict[str, Any]]],
+    dict[str, list[dict[str, Any]]],
+]:
+    """Partition annotations into document / by-chunk / by-deviation groups.
+
+    Args:
+        annotations: Raw annotation rows.
+
+    Returns:
+        ``(document_notes, by_chunk_id, by_deviation_id)``.
+    """
+    doc_notes: list[dict[str, Any]] = []
+    by_chunk: dict[str, list[dict[str, Any]]] = {}
+    by_deviation: dict[str, list[dict[str, Any]]] = {}
+    for ann in annotations:
+        target = ann.get("target_type")
+        reference = ann.get("target_reference")
+        if target == "document":
+            doc_notes.append(ann)
+        elif target == "clause" and reference:
+            by_chunk.setdefault(reference, []).append(ann)
+        elif target == "deviation" and reference:
+            by_deviation.setdefault(reference, []).append(ann)
+    return doc_notes, by_chunk, by_deviation
 
 
 def _tint_for(deviation_type: DeviationType) -> HexColor:
