@@ -12,6 +12,10 @@ services:
     environment:
       ENVIRONMENT: production
       CHROMA_PERSIST_DIR: /app/data/chroma
+      # Persistence: SQLite by default (volume below). To run on PostgreSQL,
+      # uncomment the `db` service, build the API image with the [postgres]
+      # extra, and set in .env:
+      #   DATABASE_URL=postgresql://sci:${DB_PASSWORD}@db:5432/contract_intelligence
       SQLITE_DB_PATH: /app/data/audits/audit_store.db
       LOG_DIR: /app/logs
     volumes:
@@ -52,9 +56,22 @@ services:
       - caddy-config:/config
     restart: always
 
+  # Optional managed-style PostgreSQL. Uncomment + set DATABASE_URL on `api`
+  # (see above) to move the whole persistence layer off SQLite.
+  # db:
+  #   image: postgres:16-alpine
+  #   environment:
+  #     POSTGRES_USER: sci
+  #     POSTGRES_PASSWORD: ${DB_PASSWORD}
+  #     POSTGRES_DB: contract_intelligence
+  #   volumes:
+  #     - pg-data:/var/lib/postgresql/data
+  #   restart: always
+
 volumes:
   chroma-data:
   audit-data:
   api-logs:
   caddy-data:
   caddy-config:
+  # pg-data:

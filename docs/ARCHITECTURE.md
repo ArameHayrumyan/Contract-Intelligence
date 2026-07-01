@@ -27,7 +27,8 @@ rag_core (packages/rag_core)
   ├─ engine      multi-query expansion · hybrid (vector+BM25) RRF (k=60) · structured output
   ├─ engine_xref cross-reference: clause inventory → align → classify → score
   ├─ ingestion_queue   IngestionQueue protocol + in-process impl
-  ├─ database    async SQLite (SQLAlchemy Core) audit/crossref/settings store
+  ├─ registry_store    sync document/standard registry (SQLAlchemy Core)
+  ├─ database    async audit/crossref/annotations/activity store (SQLAlchemy Core)
   ├─ report_generator  reportlab PDF reports (single-doc + portfolio)
   ├─ schemas     ContractAuditSchema with per-clause provenance
   └─ schemas_xref  CrossReferenceAuditSchema + ClauseDeviation
@@ -138,17 +139,34 @@ the audit/QA prompts read human-readable rows) and `structured_data` (the raw
 for a deterministic **cell diff** before the LLM, so the model explains a real
 comparison instead of hallucinating one over markdown.
 
-## Audit persistence (dashboard / monitoring / export)
+## Persistence (durable across restarts)
 
-The audit endpoint used to re-run the LLM pipeline on every call — no history, no
-data for a dashboard, nothing stable to export. `database.py` adds a durable
-record so the three portfolio features read persisted data, never the engine.
+Nothing user-visible lives only in memory. Two complementary stores, both
+SQLAlchemy **Core** (explicit `Table`s, readable schema, ORM-free), both
+SQLite-by-default and PostgreSQL-capable via `DATABASE_URL`:
 
-- **Store** — `rag_core/database.py`, **SQLAlchemy Core** (explicit `Table`
-  definitions, not the ORM) over **async SQLite** (`aiosqlite`). Tables:
-  `audit_results`, `crossref_results`, `tenant_settings`. Every function is
-  tenant-scoped — `tenant_id` is a required argument and always in the WHERE
-  clause. Initialised eagerly in the API lifespan (not lazily on first request).
+- **Registry — `rag_core/registry_store.py` (synchronous).** Tables `documents`
+  and `standards` (id, tenant, filename/name, status, counts, timestamps). It is
+  **sync on purpose**: these rows are written from the background ingestion
+  *threads*, so a sync engine avoids async-from-thread bridging/deadlocks and
+  keeps `ContractService` methods sync (the routers are unchanged). Only
+  transient upload bytes and the computed-audit cache remain in memory — losing
+  them on restart costs at most a re-upload or one re-compute.
+- **Audit / compliance — `rag_core/database.py` (async, `aiosqlite`).** Tables
+  `audit_results`, `crossref_results`, `crossref_deviations`, `annotations`,
+  `activity_log`, `tenant_settings`. Async because it is written from the async
+  request handlers. Both engines target the same database; for SQLite, WAL mode
+  lets them share the file.
+
+The Chroma vectors already persist on disk, the registry persists document and
+standard records + status, and the audit layer persists results, annotations,
+and the activity log — so a full API restart loses **no** user data. Both layers
+are initialised eagerly in the API lifespan (not lazily on first request).
+
+### Audit data (dashboard / monitoring / export)
+
+- Every function is tenant-scoped — `tenant_id` is a required argument and always
+  in the WHERE clause.
 - **Write path** — `GET /documents/{id}/audit` persists via
   `upsert_audit_result` *after* generation; a storage failure is logged, never
   fails the audit response. A cross-reference run persists via
