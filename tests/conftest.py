@@ -168,9 +168,16 @@ def settings() -> Settings:
 
 
 @pytest.fixture()
-def service(settings: Settings, monkeypatch: pytest.MonkeyPatch):  # type: ignore[no-untyped-def]
+def service(settings: Settings, monkeypatch: pytest.MonkeyPatch, tmp_path):  # type: ignore[no-untyped-def]
     """Build a synchronous ContractService with fakes injected."""
+    from rag_core import registry_store
     from service import ContractService
+
+    # The service persists document/standard records to the registry store;
+    # point it at an isolated temp SQLite file for the test.
+    registry_store.init_registry(
+        f"sqlite:///{(tmp_path / 'registry.db').as_posix()}"
+    )
 
     svc = ContractService(
         settings=settings,
