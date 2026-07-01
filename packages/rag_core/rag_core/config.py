@@ -111,6 +111,12 @@ class Settings(BaseSettings):
     # Relative by default so local dev works on any OS; Docker overrides this to
     # an absolute path under a mounted volume (see docker-compose.yml).
     sqlite_db_path: Path = Path("data/audits/audit_store.db")
+    # Optional: point the whole persistence layer at PostgreSQL in production by
+    # setting DATABASE_URL (e.g. ``postgresql://user:pass@host:5432/db``). When
+    # unset, the app uses the local SQLite file above. The async/sync driver
+    # variants are derived automatically — see ``async_database_url`` /
+    # ``sync_database_url``.
+    database_url: str | None = None
 
     # --- Generation tuning ---------------------------------------------------
     llm_temperature: float = Field(default=0.0, ge=0.0, le=2.0)
@@ -137,6 +143,46 @@ class Settings(BaseSettings):
         if upper not in logging.getLevelNamesMapping():
             raise ValueError(f"Unknown log level: {value!r}")
         return upper
+
+
+def _normalize_db_url(url: str, *, async_driver: bool) -> str:
+    """Return ``url`` with the correct SQLAlchemy driver for sync/async use.
+
+    Accepts a plain URL (``sqlite:///x``, ``postgresql://…``, or a
+    heroku-style ``postgres://…``) and rewrites the driver so the same
+    ``DATABASE_URL`` works for both the async (aiosqlite / asyncpg) and the
+    sync (pysqlite / psycopg) engines.
+
+    Args:
+        url: The base database URL.
+        async_driver: Whether to produce the async-driver variant.
+
+    Returns:
+        A driver-qualified SQLAlchemy URL.
+    """
+    if url.startswith("sqlite"):
+        _, _, path = url.partition(":///")
+        return f"sqlite+aiosqlite:///{path}" if async_driver else f"sqlite:///{path}"
+    if url.startswith("postgres"):
+        _, _, rest = url.partition("://")
+        return (
+            f"postgresql+asyncpg://{rest}"
+            if async_driver
+            else f"postgresql+psycopg://{rest}"
+        )
+    return url
+
+
+def async_database_url(settings: Settings) -> str:
+    """Async SQLAlchemy URL for the compliance/audit store (database.py)."""
+    base = settings.database_url or f"sqlite:///{settings.sqlite_db_path.as_posix()}"
+    return _normalize_db_url(base, async_driver=True)
+
+
+def sync_database_url(settings: Settings) -> str:
+    """Sync SQLAlchemy URL for the document/standard registry (registry_store)."""
+    base = settings.database_url or f"sqlite:///{settings.sqlite_db_path.as_posix()}"
+    return _normalize_db_url(base, async_driver=False)
 
 
 class LLMProviderFactory:

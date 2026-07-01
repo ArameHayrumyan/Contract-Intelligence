@@ -211,27 +211,32 @@ def _now_iso() -> str:
     return datetime.now(UTC).isoformat()
 
 
-async def init_db(db_path: Path | str) -> None:
+async def init_db(target: Path | str) -> None:
     """Create the async engine and tables (idempotent).
 
     Called from the API lifespan *and* from tests (which don't run the lifespan).
     Safe to call repeatedly.
 
     Args:
-        db_path: Filesystem path to the SQLite database file.
+        target: Either an async SQLAlchemy URL (anything containing ``://``,
+            e.g. ``sqlite+aiosqlite:///…`` or ``postgresql+asyncpg://…``) or a
+            filesystem path to a SQLite file (back-compat for tests).
     """
     global _engine
-    path = Path(db_path)
-    path.parent.mkdir(parents=True, exist_ok=True)
+    text = str(target)
+    if "://" in text:
+        url = text
+    else:
+        # as_posix() keeps the URL valid on Windows (backslashes would break it).
+        path = Path(target)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        url = f"sqlite+aiosqlite:///{path.as_posix()}"
     if _engine is not None:
         await _engine.dispose()
-    # as_posix() keeps the URL valid on Windows (backslashes would break it).
-    _engine = create_async_engine(
-        f"sqlite+aiosqlite:///{path.as_posix()}", future=True
-    )
+    _engine = create_async_engine(url, future=True)
     async with _engine.begin() as conn:
         await conn.run_sync(metadata.create_all)
-    logger.info("Audit database ready at %s", path)
+    logger.info("Audit database ready (%s)", url.split("@")[-1])
 
 
 async def dispose_db() -> None:

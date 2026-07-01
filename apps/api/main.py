@@ -21,10 +21,13 @@ from middleware.request_context import (
     RequestContextMiddleware,
     install_request_id_logging,
 )
+from rag_core import registry_store
 from rag_core.config import (
     ConfigurationError,
+    async_database_url,
     configure_logging as _configure_logging,
     get_settings,
+    sync_database_url,
 )
 from rag_core.database import dispose_db, init_db
 
@@ -76,14 +79,18 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         logger.exception("Refusing to start: invalid configuration")
         raise
     app.state.service = service
-    # Initialise the audit database eagerly (not lazily) so the first request
-    # never races table creation.
-    await init_db(settings.sqlite_db_path)
+    # Initialise both persistence layers eagerly (not lazily) so the first
+    # request never races table creation: the async audit/compliance store and
+    # the sync document/standard registry. Both honour DATABASE_URL (Postgres)
+    # and fall back to the local SQLite file.
+    await init_db(async_database_url(settings))
+    registry_store.init_registry(sync_database_url(settings))
     try:
         yield
     finally:
         service.shutdown()
         await dispose_db()
+        registry_store.dispose_registry()
         logger.info("API shutdown complete")
 
 

@@ -22,6 +22,7 @@ import threading
 import uuid
 from concurrent.futures import ThreadPoolExecutor
 
+from rag_core import registry_store
 from rag_core.config import LLMProviderFactory, Settings
 from rag_core.database import upsert_crossref_result
 from rag_core.engine import AuditEngine
@@ -108,13 +109,17 @@ class ContractService:
                 settings=settings, store=self._store, llm=built_llm
             )
 
-        # Tenant-scoped registries: (tenant_id, id) -> record.
-        self._registry: dict[tuple[str, str], DocumentRecord] = {}
-        self._standards: dict[tuple[str, str], StandardRecord] = {}
-        # Raw bytes awaiting processing, keyed identically. Cleared after ingest.
+        # Document & standard records are persisted in the registry store
+        # (survives restarts). Only transient state lives in memory:
+        #   _pending           — raw upload bytes awaiting ingestion
+        #   _standards_pending — (bytes, name, version) awaiting ingestion
+        #   _audit_cache       — computed audits, to avoid re-running the LLM
+        # The pending bytes are intentionally ephemeral: if the process dies
+        # mid-ingestion the upload is simply re-submitted; nothing user-visible
+        # is lost because the record's status reflects the failure.
         self._pending: dict[tuple[str, str], bytes] = {}
-        # Standard pending payloads: key -> (bytes, name, version).
         self._standards_pending: dict[tuple[str, str], tuple[bytes, str, str]] = {}
+        self._audit_cache: dict[tuple[str, str], ContractAuditSchema] = {}
         self._lock = threading.Lock()
 
         self._executor = ThreadPoolExecutor(
@@ -175,8 +180,14 @@ class ContractService:
             status=DocumentStatus.PENDING,
             page_count=page_count,
         )
+        registry_store.insert_document(
+            document_id=document_id,
+            tenant_id=tenant_id,
+            filename=filename,
+            status=DocumentStatus.PENDING.value,
+            page_count=page_count,
+        )
         with self._lock:
-            self._registry[key] = record
             self._pending[key] = data
         self._queue.enqueue(document_id, tenant_id)
         logger.info(
@@ -203,8 +214,7 @@ class ContractService:
         key = (tenant_id, document_id)
         with self._lock:
             data = self._pending.get(key)
-            record = self._registry.get(key)
-        if data is None or record is None:
+        if data is None:
             raise DocumentNotFoundError(f"No pending data for {key}")
 
         self._set_status(key, DocumentStatus.PROCESSING)
@@ -218,10 +228,13 @@ class ContractService:
             with self._lock:
                 self._pending.pop(key, None)
 
-        with self._lock:
-            record.chunk_count = len(chunks)
-            record.status = DocumentStatus.READY
-            record.error = None
+        registry_store.update_document(
+            tenant_id=tenant_id,
+            document_id=document_id,
+            status=DocumentStatus.READY.value,
+            chunk_count=len(chunks),
+            error=None,
+        )
         logger.info(
             "Ingestion finished tenant=%s document=%s chunks=%d",
             tenant_id,
@@ -302,19 +315,34 @@ class ContractService:
         )
 
     def _set_status(self, key: tuple[str, str], status: DocumentStatus) -> None:
-        """Update a record's status under lock."""
-        with self._lock:
-            record = self._registry.get(key)
-            if record is not None:
-                record.status = status
+        """Update a document's status in the registry."""
+        tenant_id, document_id = key
+        registry_store.update_document(
+            tenant_id=tenant_id, document_id=document_id, status=status.value
+        )
 
     def _fail(self, key: tuple[str, str], error: str) -> None:
-        """Mark a record failed with an error message."""
-        with self._lock:
-            record = self._registry.get(key)
-            if record is not None:
-                record.status = DocumentStatus.FAILED
-                record.error = error
+        """Mark a document failed with an error message."""
+        tenant_id, document_id = key
+        registry_store.update_document(
+            tenant_id=tenant_id,
+            document_id=document_id,
+            status=DocumentStatus.FAILED.value,
+            error=error,
+        )
+
+    @staticmethod
+    def _to_document_record(row: dict[str, object]) -> DocumentRecord:
+        """Build a :class:`DocumentRecord` from a registry row."""
+        return DocumentRecord(
+            document_id=str(row["document_id"]),
+            tenant_id=str(row["tenant_id"]),
+            filename=str(row["filename"]),
+            status=DocumentStatus(str(row["status"])),
+            page_count=row["page_count"],  # type: ignore[arg-type]
+            chunk_count=row["chunk_count"],  # type: ignore[arg-type]
+            error=row["error"],  # type: ignore[arg-type]
+        )
 
     # --- Reads ---------------------------------------------------------------
 
@@ -331,11 +359,10 @@ class ContractService:
         Raises:
             DocumentNotFoundError: If the document is unknown for the tenant.
         """
-        with self._lock:
-            record = self._registry.get((tenant_id, document_id))
-        if record is None:
+        row = registry_store.get_document(tenant_id, document_id)
+        if row is None:
             raise DocumentNotFoundError(document_id)
-        return record
+        return self._to_document_record(row)
 
     def get_audit(
         self, *, tenant_id: str, document_id: str
@@ -353,9 +380,12 @@ class ContractService:
             DocumentNotFoundError: If the document is unknown for the tenant.
             ValueError: If the document is not yet ``READY``.
         """
+        cache_key = (tenant_id, document_id)
+        with self._lock:
+            cached = self._audit_cache.get(cache_key)
+        if cached is not None:
+            return cached
         record = self.get_document(tenant_id=tenant_id, document_id=document_id)
-        if record.audit is not None:
-            return record.audit
         if record.status is not DocumentStatus.READY:
             raise ValueError(
                 f"Document {document_id} is not ready (status={record.status.value})."
@@ -364,7 +394,7 @@ class ContractService:
             tenant_id=tenant_id, document_id=document_id
         )
         with self._lock:
-            record.audit = audit
+            self._audit_cache[cache_key] = audit
         return audit
 
     def answer_question(
@@ -421,8 +451,14 @@ class ContractService:
             tenant_id=tenant_id,
             status=DocumentStatus.PENDING.value,
         )
+        registry_store.insert_standard(
+            standard_document_id=standard_document_id,
+            tenant_id=tenant_id,
+            standard_name=standard_name,
+            standard_version=standard_version,
+            status=DocumentStatus.PENDING.value,
+        )
         with self._lock:
-            self._standards[key] = record
             self._standards_pending[key] = (data, standard_name, standard_version)
         self._standards_queue.enqueue(standard_document_id, tenant_id)
         logger.info(
@@ -447,13 +483,15 @@ class ContractService:
         key = (tenant_id, standard_document_id)
         with self._lock:
             payload = self._standards_pending.get(key)
-            record = self._standards.get(key)
-        if payload is None or record is None:
+        if payload is None:
             raise StandardNotFoundError(f"No pending standard for {key}")
         data, name, version = payload
 
-        with self._lock:
-            record.status = DocumentStatus.PROCESSING.value
+        registry_store.update_standard(
+            tenant_id=tenant_id,
+            standard_document_id=standard_document_id,
+            status=DocumentStatus.PROCESSING.value,
+        )
         try:
             chunks = self._parse_to_chunks(data, standard_document_id, tenant_id)
             self._store.add_standard_chunks(
@@ -463,18 +501,24 @@ class ContractService:
                 standard_name=name,
             )
         except Exception as exc:  # noqa: BLE001 - record failure on the standard
-            with self._lock:
-                record.status = DocumentStatus.FAILED.value
-                record.error = str(exc)
+            registry_store.update_standard(
+                tenant_id=tenant_id,
+                standard_document_id=standard_document_id,
+                status=DocumentStatus.FAILED.value,
+                error=str(exc),
+            )
             raise
         finally:
             with self._lock:
                 self._standards_pending.pop(key, None)
 
-        with self._lock:
-            record.chunk_count = len(chunks)
-            record.status = DocumentStatus.READY.value
-            record.error = None
+        registry_store.update_standard(
+            tenant_id=tenant_id,
+            standard_document_id=standard_document_id,
+            status=DocumentStatus.READY.value,
+            chunk_count=len(chunks),
+            error=None,
+        )
         logger.info(
             "Standard ingested tenant=%s standard=%s chunks=%d",
             tenant_id,
@@ -491,9 +535,21 @@ class ContractService:
         Returns:
             Standard records, sorted by name then version.
         """
-        with self._lock:
-            records = [r for (t, _), r in self._standards.items() if t == tenant_id]
-        return sorted(records, key=lambda r: (r.standard_name, r.standard_version))
+        rows = registry_store.list_standards(tenant_id)
+        return [self._to_standard_record(r) for r in rows]
+
+    @staticmethod
+    def _to_standard_record(row: dict[str, object]) -> StandardRecord:
+        """Build a :class:`StandardRecord` from a registry row."""
+        return StandardRecord(
+            standard_document_id=str(row["standard_document_id"]),
+            standard_name=str(row["standard_name"]),
+            standard_version=str(row["standard_version"]),
+            tenant_id=str(row["tenant_id"]),
+            status=str(row["status"]),
+            chunk_count=row["chunk_count"],  # type: ignore[arg-type]
+            error=row["error"],  # type: ignore[arg-type]
+        )
 
     def get_standard(
         self, *, tenant_id: str, standard_document_id: str
@@ -510,11 +566,10 @@ class ContractService:
         Raises:
             StandardNotFoundError: If unknown for (or not owned by) the tenant.
         """
-        with self._lock:
-            record = self._standards.get((tenant_id, standard_document_id))
-        if record is None:
+        row = registry_store.get_standard(tenant_id, standard_document_id)
+        if row is None:
             raise StandardNotFoundError(standard_document_id)
-        return record
+        return self._to_standard_record(row)
 
     async def cross_reference(
         self,

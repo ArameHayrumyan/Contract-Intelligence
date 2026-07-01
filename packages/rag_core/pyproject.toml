@@ -53,6 +53,13 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
+# Production PostgreSQL drivers (async + sync). Not needed for the default
+# SQLite deployment; install with `pip install rag_core[postgres]` and set
+# DATABASE_URL to switch the whole persistence layer to PostgreSQL.
+postgres = [
+    "asyncpg>=0.29",
+    "psycopg[binary]>=3.1",
+]
 dev = [
     "ruff>=0.4",
     "mypy>=1.10",
